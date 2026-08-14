@@ -8,56 +8,54 @@ Environment variables in Optimizely Frontend Hosting are used at two different t
 1. **Build time**: Available during `npm run build` or `yarn build`
 2. **Runtime**: Available when the Next.js application is running
 
-## Required Deployment Credentials
+## Deployment Credentials
 
-These are used by PowerShell scripts to authenticate with the Optimizely Cloud Deployment API. They must be set in your local environment before running deployment scripts.
+These authenticate the opticloud CLI against the Optimizely Cloud Deployment API. They are
+**not** application variables — they never reach the running app.
 
-### OPTI_PROJECT_ID
+All three come from **PaaS Portal > Your Frontend Project > API tab > Add API Credentials**.
 
-**Purpose**: Identifies your specific Optimizely project
+| Variable | Format | Notes |
+|---|---|---|
+| `OPTI_PROJECT_ID` | GUID, e.g. `2a561398-d517-4634-9bc4-aab5008a8e1a` | Identifies the project |
+| `OPTI_CLIENT_KEY` | String, e.g. `dxp-abc123xyz456` | API key |
+| `OPTI_CLIENT_SECRET` | String | Shown **once** at creation — regenerate if lost |
+| `OPTI_API_ENDPOINT` | URL | Optional; defaults to `https://paasportal.episerver.net/api/v1.0/` |
 
-**Where to get it**: PaaS Portal > Your Frontend Project > API tab
+### How opticloud resolves them
 
-**Format**: GUID (e.g., `2a561398-d517-4634-9bc4-aab5008a8e1a`)
+1. Explicit flags — `--client-key`, `--client-secret`, `--project-id`
+2. Environment variables — the `OPTI_*` names above, read from the process environment
+3. OS keychain — populated by `opticloud auth:login`
 
-**Set in**: Local environment (your machine)
+**opticloud does not read `.env` files.** There is no dotenv loading; the variables must
+already be in the environment. A project `.env` containing `OPTI_*` does nothing on its own
+— if deployment works anyway, the keychain is what's serving the credentials.
 
-**Example**:
-```powershell
-$env:OPTI_PROJECT_ID = "2a561398-d517-4634-9bc4-aab5008a8e1a"
+**Local development** — authenticate once, then forget about it:
+
+```bash
+opticloud auth:login     # stores in Windows Credential Manager / macOS Keychain / libsecret
+opticloud auth:status    # verify
 ```
 
-### OPTI_CLIENT_KEY
+**CI** — no keychain exists on a build agent, so export from secrets:
 
-**Purpose**: API authentication key
-
-**Where to get it**: PaaS Portal > Your Frontend Project > API tab > Add API Credentials
-
-**Format**: String (e.g., `dxp-abc123xyz456`)
-
-**Set in**: Local environment (your machine)
-
-**Example**:
-```powershell
-$env:OPTI_CLIENT_KEY = "dxp-abc123xyz456"
+```bash
+export OPTI_PROJECT_ID="..."
+export OPTI_CLIENT_KEY="..."
+export OPTI_CLIENT_SECRET="..."
+opticloud ship ./ --type=head --target=Production --skip-validation
 ```
 
-### OPTI_CLIENT_SECRET
+**To use a `.env` file deliberately**, load it explicitly:
 
-**Purpose**: API authentication secret
-
-**Where to get it**: PaaS Portal > Your Frontend Project > API tab > Add API Credentials
-
-**Format**: String (displayed only once when created)
-
-**Set in**: Local environment (your machine)
-
-**Security**: Keep this secret! Don't commit to version control.
-
-**Example**:
-```powershell
-$env:OPTI_CLIENT_SECRET = "your-secret-here"
+```bash
+node --env-file=.env node_modules/.bin/opticloud ship ./ --type=head --target=Test2
 ```
+
+Credentials are scoped to selected environments when created. If `--target` reports the
+environment doesn't exist, the credentials likely lack access to it.
 
 ## Automatic Runtime Variables
 
@@ -82,13 +80,19 @@ const cmsUrl = process.env.OPTIMIZELY_CMS_URL;
 
 **Purpose**: Optimizely Graph API endpoint
 
-**Format**: `https://cg.optimizely.com/content/v2`
+**Format**: **Differs between local and hosted.** In the Frontend Hosting runtime this is
+the bare hostname — `https://cg.optimizely.com` — with no path to the Graph API. Locally it
+is typically set to the full path, `https://cg.optimizely.com/content/v2`.
 
 **Available**: Build time and runtime
 
-**Usage in Next.js**:
+This inconsistency is the single most common source of "works locally, 404s in production"
+on this platform. The Content JS SDK needs the full path, so never read the variable
+directly — normalize it, appending the path when absent. `SKILL.md` carries a
+`getGraphGatewayUrl()` implementation.
+
 ```typescript
-const graphEndpoint = process.env.OPTIMIZELY_GRAPH_GATEWAY;
+const graphEndpoint = getGraphGatewayUrl(); // not process.env.OPTIMIZELY_GRAPH_GATEWAY
 
 const response = await fetch(graphEndpoint, {
   method: 'POST',
@@ -99,6 +103,9 @@ const response = await fetch(graphEndpoint, {
   body: JSON.stringify({ query: graphqlQuery })
 });
 ```
+
+An optional `OPTIMIZELY_GRAPH_PATH` (default `/content/v2`) lets the path be configured
+rather than hardcoded.
 
 ### OPTIMIZELY_GRAPH_SECRET
 
@@ -136,13 +143,37 @@ const response = await fetch(process.env.OPTIMIZELY_GRAPH_GATEWAY, {
 
 ### OPTIMIZELY_GRAPH_APP_KEY
 
-**Purpose**: Application key for Optimizely Graph
+**Purpose**: Application key for Optimizely Graph. Identifies your application when
+querying, and pairs with `OPTIMIZELY_GRAPH_SECRET` as Basic auth credentials for webhook
+registration against `<gateway>/api/webhooks`.
 
 **Format**: String
 
 **Available**: Build time and runtime
 
-**Usage**: Used to identify your application when querying Optimizely Graph.
+### ISR and infrastructure variables
+
+Also provisioned automatically, and needed once you enable ISR with a shared cache handler
+and webhook-driven invalidation. None of these exist locally — code that reads them must
+degrade gracefully rather than throw (fall back to an in-memory cache, make CDN purge a
+no-op) so local development works unchanged.
+
+This table is the platform's side of the contract: what exists, and what it contains. For
+how to consume it — `cache-handler.mjs`, `'use cache'` / `cacheTag`, the `/hooks/graph`
+route — use the `optimizely-cms-nextjs` skill.
+
+| Variable | Purpose |
+|---|---|
+| `REDIS_URL` | Azure Cache for Redis hostname and port, e.g. `myredis.redis.azure.net:10000`. Hostname and port only — no scheme, no credentials. TLS (`rediss://`) is required. |
+| `AZURE_CLIENT_ID` | Managed identity client ID used to authenticate to Redis and the CDN purge API |
+| `OPTIMIZELY_DXP_DEPLOYMENT_ID` | Deployment slot ID. Namespaces cache keys so slots sharing a Redis instance don't collide. |
+| `OPTIMIZELY_SITE_HOSTNAME` | Public hostname of the site. Used to build the webhook callback URL and CDN purge targets. |
+| `OPTIMIZELY_GRAPH_CALLBACK_APIKEY` | Shared secret for authenticating **incoming** webhook requests. Validate against this in the callback handler — it is a public endpoint. |
+| `OPTIMIZELY_CLOUDPLATFORM_API_URL` | Cloud Platform Services API base URL, for edge cache purge |
+| `OPTIMIZELY_CLOUDPLATFORM_API_RESOURCE_ID` | Resource ID forming the managed-identity token scope (`${RESOURCE_ID}/.default`) |
+
+Authentication to Redis and the purge API is via Azure managed identity — there are no
+connection strings or passwords to store anywhere.
 
 ## Custom Application Settings
 
@@ -351,14 +382,10 @@ export default function Page() {
 
 ### Minimal Setup
 
-```powershell
-# Local deployment credentials
-$env:OPTI_PROJECT_ID = "your-project-id"
-$env:OPTI_CLIENT_KEY = "your-client-key"
-$env:OPTI_CLIENT_SECRET = "your-client-secret"
-```
+Deployment credentials: `opticloud auth:login` once. Nothing per project, nothing in `.env`.
 
-PaaS Portal App Settings: (none required - Optimizely variables are automatic)
+PaaS Portal App Settings: none required — the Optimizely variables are injected
+automatically.
 
 ### Full Production Setup
 

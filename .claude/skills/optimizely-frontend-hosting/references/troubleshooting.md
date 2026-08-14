@@ -1,167 +1,68 @@
 # Troubleshooting Guide
 
-Common issues and solutions when deploying to Optimizely Frontend Hosting.
+Failure modes when deploying Next.js applications to Optimizely Frontend Hosting with
+opticloud.
 
-## Critical Mistakes to Avoid
+## First: get the actual error
 
-### 1. Missing Environment Variables
+Deployment failures are almost always platform-side (the build), not CLI-side. The CLI's
+output tells you the deployment failed; the deployment logs tell you why.
 
-**Problem**: Deployment starts but build fails immediately because environment variables are not set.
+```bash
+# Find the deployment
+opticloud deployment:list
 
-**Why it happens**: The deployment process triggers a production build (`npm run build` or `yarn build`) immediately. If required environment variables are missing, the build fails and the environment can remain locked.
+# The real error
+opticloud deployment:logs <deployment-id> --errors-only
 
-**Solution**: Always set ALL required environment variables in the PaaS Portal BEFORE starting deployment.
-
-**How to fix**:
-1. Go to PaaS Portal > App Settings tab
-2. Add all required environment variables
-3. Wait for settings to apply (may take a few minutes)
-4. Then start deployment
-
-**Variables to set**:
-- `OPTIMIZELY_CMS_URL` - Set via PaaS Portal
-- `OPTIMIZELY_GRAPH_GATEWAY` - Set via PaaS Portal
-- `OPTIMIZELY_GRAPH_SECRET` - Set via PaaS Portal
-- `OPTIMIZELY_GRAPH_SINGLE_KEY` - Set via PaaS Portal
-- `OPTIMIZELY_GRAPH_APP_KEY` - Set via PaaS Portal
-- Any custom variables your app needs (API keys, feature flags, etc.)
-
-### 2. Invalid ZIP Structure
-
-**Problem**: Package is rejected or build fails because files are not at the root level.
-
-**Why it happens**: Using Windows "Send to ZIP" or similar tools wraps files in an extra folder.
-
-**Solution**: Create ZIP properly with `package.json` at root level.
-
-**Example of CORRECT structure**:
-```
-myapp.head.app.1.0.0.zip
-├── package.json          ← At root level
-├── package-lock.json
-├── next.config.js
-├── public/
-├── src/
-└── ...
+# Full log — build output, warnings, progress
+opticloud deployment:logs <deployment-id>
 ```
 
-**Example of INCORRECT structure**:
-```
-myapp.head.app.1.0.0.zip
-└── myapp/                ← Extra folder
-    ├── package.json      ← NOT at root
-    ├── package-lock.json
-    └── ...
-```
+Also available in the PaaS Portal under the **Deployment** tab. Don't start changing
+configuration before reading these.
 
-**How to verify**: Extract the ZIP and check that `package.json` is immediately visible.
+## Handled automatically — no longer your problem
 
-**How to create correct ZIP**:
-- Use the provided `deploy.ps1` script (handles this automatically)
-- Or use PowerShell: `Compress-Archive -Path .\* -DestinationPath package.zip`
-- Or use 7-Zip: Select files (not folder), right-click > 7-Zip > Add to archive
+These were the classic manual-deployment failures. `opticloud package:create` and `ship`
+handle all of them; if you hit one of these symptoms, something unusual is going on, not
+the old known issue.
 
-### 3. Missing Files Due to Incorrect Patterns
+- **ZIP root structure** — `package.json` at the archive root, not nested in a folder
+- **Package naming** — the `.head.app.` segment that distinguishes frontend from .NET packages
+- **Special directory names** — route groups `(marketing)` and dynamic segments `[slug]`,
+  `[...catchAll]` are packaged correctly
+- **`node_modules` / `.next` exclusion** — excluded by default, keeping packages at ~5–20 MB
+  instead of ~300–500 MB
 
-**Problem**: Deployment succeeds but application doesn't work correctly. Files like `page.tsx` in route groups or dynamic routes are missing.
-
-**Why it happens**: Automation scripts or ZIP tools may not handle special folder names correctly:
-- Route groups: `(marketing)`, `(auth)`, `(shop)`
-- Dynamic routes: `[slug]`, `[id]`, `[...catchAll]`
-
-**Solution**: Verify ZIP contents before uploading.
-
-**How to check**:
-```powershell
-# Extract and inspect
-Expand-Archive -Path .\myapp.head.app.1.0.0.zip -DestinationPath .\temp-check
-tree /F .\temp-check
-
-# Look for:
-# - All route group folders: (marketing), (auth), etc.
-# - All dynamic route folders: [slug], [id], etc.
-# - All page.tsx, layout.tsx, loading.tsx files
-```
-
-**Prevention**: Use the provided `deploy.ps1` script which handles all file types correctly.
-
-### 4. Incorrect Package Naming
-
-**Problem**: Package is treated as a .NET NuGet package instead of a frontend package.
-
-**Why it happens**: Package name doesn't follow the required convention.
-
-**Solution**: Always use `.head.app.` in the filename.
-
-**Correct naming examples**:
-```
-myapp.head.app.1.0.0.zip          ✓
-site.head.app.20250114.zip        ✓
-frontend.head.app.build-123.zip   ✓
-```
-
-**Incorrect naming examples**:
-```
-myapp.1.0.0.zip                   ✗ (missing .head.app.)
-myapp.head.1.0.0.zip              ✗ (typo: should be .head.app.)
-myapp-head-app-1.0.0.zip          ✗ (using dashes instead of dots)
-```
-
-### 5. Including node_modules or .next
-
-**Problem**: Deployment package is huge and takes very long to upload.
-
-**Why it happens**: Including `node_modules` (dependencies) or `.next` (build output) in the package.
-
-**Solution**: Exclude these directories - they are regenerated during deployment.
-
-**Why they're excluded**:
-- `node_modules`: Dependencies are installed during deployment via `npm install` or `yarn install`
-- `.next`: Build output is generated during deployment via `npm run build` or `yarn build`
-
-**How to exclude**:
-1. Create `.zipignore` file (recommended - automated by `deploy.ps1`)
-2. Or manually exclude when creating ZIP
-
-**Typical .zipignore**:
-```
-.next
-node_modules
-.env
-.git
-```
-
-**Before/After**:
-- With node_modules: ~300-500 MB package ✗
-- Without node_modules: ~5-20 MB package ✓
-
-## Build Errors
-
-### "Module not found" or "Cannot find package"
-
-**Cause**: Missing dependency in `package.json` or `yarn.lock`/`package-lock.json` not included.
-
-**Solution**:
-1. Ensure `package-lock.json` (npm) or `yarn.lock` (yarn) is in your package
-2. Verify all dependencies are listed in `package.json`
-3. Run `npm install` or `yarn install` locally to regenerate lock file if needed
+## Build failures
 
 ### "Environment variable ... is not defined"
 
-**Cause**: Required environment variable not set in PaaS Portal before deployment.
+The deployment triggers a production build immediately. A build that reads a missing
+variable fails, and the environment can stay locked.
 
-**Solution**:
-1. Stop current deployment if it's running
-2. Go to PaaS Portal > App Settings
-3. Add the missing environment variable
-4. Wait a few minutes for settings to apply
-5. Start new deployment
+1. **PaaS Portal > App Settings** for the target environment
+2. Add the variable
+3. Wait 2–3 minutes for settings to propagate
+4. Redeploy
+
+Set every variable the build needs *before* the first deployment. If the environment is
+locked, `opticloud deployment:reset <id>`.
+
+### "Module not found" / "Cannot find package"
+
+The lock file is missing from the package, or a dependency is only installed locally.
+
+- Confirm `package-lock.json` / `yarn.lock` is not excluded by `.zipignore`
+- Confirm the dependency is in `dependencies`, not `devDependencies`, if it's needed at
+  runtime — the platform may prune dev dependencies
+- Reproduce locally with a clean install: `rm -rf node_modules && npm ci && npm run build`
 
 ### "Build script not found"
 
-**Cause**: Missing or incorrectly named build script in `package.json`.
+`package.json` needs both:
 
-**Solution**: Ensure `package.json` has:
 ```json
 {
   "scripts": {
@@ -171,175 +72,162 @@ node_modules
 }
 ```
 
-### Build timeout
+### Build timeout (>20 minutes)
 
-**Cause**: Build takes too long (>20 minutes).
+Usually a build that hangs rather than one that's genuinely slow. Check for something
+awaiting a network call that never resolves — a CMS or Graph fetch during static generation
+pointed at an unreachable host is the common cause, especially if the variable it reads is
+unset in that environment.
 
-**Solution**:
-1. Optimize build process
-2. Reduce bundle size
-3. Check for infinite loops or hanging processes
-4. Ensure no unnecessary heavy computations during build
+### Build succeeds locally, fails on the platform
 
-## Deployment Errors
+Almost always an environment difference:
 
-### "Authentication failed"
+- Case-sensitive imports — the platform is Linux, Windows and macOS are not. `import Card
+  from './card'` resolving to `Card.tsx` works locally and fails there.
+- Node version mismatch — pin with `engines` in `package.json`
+- A variable present in your local `.env` but never added to App Settings
 
-**Cause**: Invalid or expired credentials.
+## Authentication failures
 
-**Solution**:
-```powershell
-# Verify environment variables
-echo $env:OPTI_PROJECT_ID
-echo $env:OPTI_CLIENT_KEY
-echo $env:OPTI_CLIENT_SECRET
+```bash
+# Is anything stored, and is it valid?
+opticloud auth:status
 
-# If wrong, re-run setup
-.\setup-env.ps1
+# Re-authenticate
+opticloud auth:logout
+opticloud auth:login
 ```
 
-### "Package already exists"
+### Works locally, fails in CI
 
-**Cause**: Trying to upload a package with the same name but different content.
+The usual cause. opticloud reads credentials from flags, then `OPTI_*` environment
+variables, then the OS keychain — **it never reads `.env` files**. Locally you're being
+served by the keychain; a build agent has no keychain, and a `.env` in the repo does not
+substitute for one.
 
-**Solution**: Use a different version number or timestamp in the package name.
-
-```powershell
-# Auto-generate unique name with timestamp
-$timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$zipName = "myapp.head.app.$timestamp.zip"
-```
+Export the variables from CI secrets, or pass `--client-key` / `--client-secret` /
+`--project-id` explicitly.
 
 ### "Target environment not found"
 
-**Cause**: Incorrect environment name or credentials don't have access.
+The credentials don't grant access to that environment. API credentials are scoped to
+selected environments at creation time in **PaaS Portal > API tab** — regenerate with the
+right environments selected. Also verify the name: `Test1`, `Test2`, `Production` for SaaS
+Frontend Hosting.
 
-**Solution**:
-1. Verify environment name matches exactly (Test1, Test2, Production)
-2. Check API credentials have access to this environment in PaaS Portal
-3. Re-generate API credentials with correct environment access if needed
+## Deployment failures
 
-### "Deployment failed" (generic)
+### Environment is locked / a deployment is stuck
 
-**Cause**: Various reasons - need to check logs.
+Usually a deployment genuinely in progress — wait for it. If it's wedged:
 
-**Solution**:
-1. Go to PaaS Portal > Deployment tab
-2. Click on the failed deployment
-3. View detailed logs
-4. Look for specific error messages
-5. Check troubleshooting sections above based on error
+```bash
+opticloud deployment:list                # find the deployment ID and state
+opticloud deployment:reset <id>          # roll back to the previous state
+```
 
-## Runtime Issues
+Reset returns the environment to its prior state. Nothing is partially applied — a failed
+deployment leaves the environment as it was.
+
+### "Package already exists"
+
+A package with that name exists with different content. Names are
+`[prefix.]head.app.[version].zip`, and the default version is a timestamp, so this only
+happens with an explicit `--version`. Bump it, or drop `--version` to get a fresh timestamp.
+
+### Upload fails or stalls
+
+Check package size — if it's over ~50 MB, something that should be excluded isn't:
+
+```bash
+opticloud package:create ./ --type=head --output=./packages
+unzip -l ./packages/*.zip | tail -5
+```
+
+Look for `node_modules`, `.next`, media, or a stray `.git` directory, and add them to
+`.zipignore`.
+
+## Secrets in the package
+
+opticloud excludes `.env` and `.env.local` by default but that is a convenience, not a
+security boundary. It will happily package `.env.template` with real values filled in,
+`certificates/`, `*.pem`, or a credential dump someone left in the repo root.
+
+Audit the artifact rather than assuming:
+
+```bash
+opticloud package:create ./ --type=head --output=./packages
+unzip -l ./packages/*.zip | grep -iE '\.env|secret|credential|\.pem|\.key|certificate'
+```
+
+If a secret has already shipped, rotate it — a deployed package is not retrievable but it
+did reach the platform.
+
+## Runtime issues
 
 ### Application doesn't start
 
-**Check**:
-1. PaaS Portal > Troubleshoot tab > Application Logs
-2. Look for startup errors
-3. Verify `start` script in `package.json`: `"start": "next start"`
+1. **PaaS Portal > Troubleshoot > Application Logs**
+2. Verify `"start": "next start"` in `package.json`
+3. Check for a variable that's present at build but missing at runtime
 
-### Environment variables not available at runtime
+### Environment variables undefined at runtime
 
-**Check**:
-1. PaaS Portal > App Settings tab
-2. Verify variables are set
-3. Restart application: Troubleshoot tab > Restart Web App
+1. Verify the variable is set for the *correct environment* in App Settings
+2. Restart: **Troubleshoot > Restart Web App**
+3. Check the exact spelling
 
-### Visual Builder not showing content
+`NEXT_PUBLIC_*` variables are a different case — they're inlined at **build** time, so
+adding one after a build has no effect until you redeploy.
 
-**Cause**: Application not properly configured in CMS or hostname mapping missing.
+### Content is stale, or updates then reverts
 
-**Solution**:
-1. CMS > Settings > Applications
-2. Create/select your application
-3. Go to Hostnames section
-4. Add hostname from PaaS Portal (e.g., `test1-myapp.cms.optimizely.com`)
-5. Settings > Scheduled jobs > Reindex content
+An ISR configuration problem, not a deployment problem. The usual cause is ISR without a
+shared cache handler, so each replica holds its own cache and you see whichever one the
+load balancer picked. Confirm `REDIS_URL` is set in the environment and that the app is
+actually connecting to it rather than silently falling back to in-memory.
 
-### CDN not serving latest content
+For the fix, use the `optimizely-cms-nextjs` skill — cache handler and revalidation wiring
+are application-layer concerns.
 
-**Solution**:
-1. PaaS Portal > Troubleshoot tab
-2. Click "Purge Cache"
-3. Wait a few minutes for cache to clear
+### CDN serving old content
 
-## Getting Help
+**PaaS Portal > Troubleshoot > Purge Cache** for a manual purge. Automating it from the
+publish webhook is covered by the `optimizely-cms-nextjs` skill.
 
-### Enable verbose logging
+To confirm the CDN is the layer at fault, request the page with a cache-busting query
+string. Fresh content means the origin is fine and the edge is stale.
 
-During deployment:
-```powershell
-Start-EpiDeployment ... -Verbose
+### Visual Builder shows nothing
+
+The hostname mapping is missing:
+
+1. **CMS > Settings > Applications** — select your application
+2. **Hostnames** — add the hostname from the PaaS Portal
+3. **Settings > Scheduled jobs** — reindex content
+
+## Debugging opticloud itself
+
+```bash
+DEBUG=opticloud* opticloud ship ./ --type=head --target=Test2
 ```
 
-### Check deployment details
+opticloud is a community MIT project, not an Optimizely product. Platform issues go to
+Optimizely Support; CLI bugs go to https://github.com/kunalshetye/opticloud/issues.
 
-```powershell
-# List all deployments
-Get-EpiDeployment
+## Pre-deployment checklist
 
-# Get specific deployment
-$deployment = Get-EpiDeployment -Id <deployment-id>
+- [ ] `opticloud auth:status` succeeds
+- [ ] All required variables set in App Settings for the target environment
+- [ ] `package.json` has `build` and `start`
+- [ ] Lock file present and not excluded by `.zipignore`
+- [ ] `npm ci && npm run build` passes locally from a clean `node_modules`
+- [ ] Package audited for secrets
+- [ ] No other deployment in flight for this project
 
-# View as JSON
-$deployment | ConvertTo-Json -Depth 10
-```
+## Contacting support
 
-### View application logs
-
-1. PaaS Portal > Troubleshoot tab
-2. Click "Open Log Stream Window"
-3. Watch real-time logs from your application
-
-### Export logs
-
-1. PaaS Portal > Troubleshoot tab
-2. Application Logs section
-3. Generate download link
-4. Download and analyze logs locally
-
-## Prevention Checklist
-
-Before each deployment, verify:
-
-- [ ] Environment variables set in PaaS Portal
-- [ ] `.zipignore` file exists and is correct
-- [ ] `package.json` has `build` and `start` scripts
-- [ ] Package name follows `<n>.head.app.<version>.zip` format
-- [ ] `package-lock.json` or `yarn.lock` is included
-- [ ] `.next` and `node_modules` are excluded
-- [ ] Test locally that `npm run build` or `yarn build` works
-- [ ] All route groups and dynamic routes are included
-
-## Common Questions
-
-**Q: How long does deployment take?**
-A: Typically 5-10 minutes. Depends on:
-- Package upload size
-- Number of dependencies to install
-- Build complexity
-- Environment load
-
-**Q: Can I deploy to multiple environments at once?**
-A: No, deploy to one environment at a time. Wait for completion before deploying to next environment.
-
-**Q: What happens if deployment fails midway?**
-A: The environment remains in its previous state. No partial updates. Fix the issue and deploy again.
-
-**Q: Can I rollback a deployment?**
-A: Yes, deploy a previous package version. Keep track of working package versions.
-
-**Q: How do I update just environment variables without redeploying?**
-A: Update in PaaS Portal > App Settings. Then restart the application.
-
-**Q: The environment is locked, what do I do?**
-A: Usually means a deployment is in progress. Wait for it to complete or fail. If stuck, contact Optimizely Support.
-
-## Contact Support
-
-If issues persist:
-1. Gather deployment logs and error messages
-2. Note the deployment ID
-3. Contact Optimizely Support via PaaS Portal
-4. Provide: project ID, environment name, deployment ID, error details
+For platform-side issues, gather: project ID, environment name, deployment ID, and the
+output of `opticloud deployment:logs <id>`. Contact Optimizely Support through the PaaS
+Portal.

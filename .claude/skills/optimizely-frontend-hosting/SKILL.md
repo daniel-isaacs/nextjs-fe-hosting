@@ -1,6 +1,6 @@
 ---
 name: optimizely-frontend-hosting
-description: Configure and deploy Next.js applications to Optimizely Frontend Hosting for CMS (SaaS). Use this skill when the user needs to (1) Set up frontend hosting configuration, (2) Deploy a Next.js app to Optimizely Frontend Hosting, (3) Manage environment variables for frontend hosting, (4) Create deployment scripts, or (5) Troubleshoot frontend hosting deployments. This skill is specifically for Optimizely SaaS CMS, not CMS 12 (PaaS).
+description: Configure and deploy Next.js applications to Optimizely Frontend Hosting for CMS (SaaS) using the opticloud CLI. Use this skill when the user needs to (1) Deploy a Next.js app to Frontend Hosting, (2) Set up or troubleshoot opticloud (ship, auth, deployment, logs, package contents), (3) Manage deployment credentials and the build-time/runtime variables the platform injects, or (4) Diagnose failed, stuck, or stale deployments. Covers the hosting-level constraints on ISR (multi-instance architecture, why a shared cache handler is mandatory, which variables the platform provisions) but NOT its implementation — defer cache-handler.mjs, 'use cache'/cacheTag, revalidation webhooks, and CDN purge wiring to the optimizely-cms-nextjs skill. This skill is specifically for Optimizely SaaS CMS, not CMS 12 (PaaS).
 ---
 
 # Optimizely Frontend Hosting
@@ -9,61 +9,107 @@ Deploy and manage Next.js applications on Optimizely Frontend Hosting for CMS (S
 
 ## Overview
 
-Optimizely Frontend Hosting is a cloud-based solution for deploying headless Next.js applications with an Optimizely CMS (SaaS) backend. It provides managed environments (Test1, Test2, Production) with built-in CDN and WAF powered by Cloudflare.
+Optimizely Frontend Hosting runs headless Next.js applications against an Optimizely CMS (SaaS) backend. It provides managed environments (Test1, Test2, Production) on Azure, with CDN and WAF powered by Cloudflare.
 
 **Key characteristics:**
-- Next.js support only (SSG and SSR, ISR not yet supported)
+- Next.js only — SSG, SSR, **and ISR** (see below)
 - Managed environments integrated with CMS (SaaS)
 - Automatic CDN and WAF configuration
-- Static site hosting with Azure infrastructure
+- Deployment is source-based: you ship source, the platform runs `npm install` + `npm run build`
+
+**ISR is supported.** Earlier platform versions did not support it; guidance saying
+otherwise is out of date.
+
+One hosting-level constraint shapes everything downstream: Frontend Hosting runs **multiple
+application instances behind a load balancer**, and Next.js's default ISR cache lives on the
+local filesystem — per instance. Revalidating on one replica leaves the others stale, and
+which replica a visitor hits is arbitrary. The symptom is content that updates, then reverts
+on refresh.
+
+ISR therefore requires a **shared cache handler**. The platform provisions Redis for this,
+along with `REDIS_URL`, `AZURE_CLIENT_ID`, and `OPTIMIZELY_DXP_DEPLOYMENT_ID` — see
+`references/environment-variables.md`.
+
+**Implementing it belongs to the `optimizely-cms-nextjs` skill, not this one.**
+`cache-handler.mjs`, `'use cache'` / `cacheLife` / `cacheTag`, the `/hooks/graph`
+revalidation webhook, and CDN purge wiring are application-layer concerns. Invoke that
+skill for them. This skill's scope is the platform constraint above and the variables the
+platform injects.
+
+## Deploying: use the opticloud CLI
+
+Deployments go through [`@kunalshetye/opticloud`](https://github.com/kunalshetye/opticloud),
+a cross-platform Node CLI for the DXP Cloud deployment API. Its `ship` command collapses
+the whole workflow — package, upload, deploy, monitor, complete — into one command, and
+handles the details that used to be manual footguns: package naming, ZIP root structure,
+`.zipignore` handling, and deployment polling.
+
+```bash
+npx @kunalshetye/opticloud ship ./ --type=head --prefix=mysite --target=Test2
+```
+
+**Prefer `ship` over the individual commands.** Reach for `package:create` /
+`package:upload` / `deployment:start` only when a step needs to be inspected or retried
+in isolation.
+
+> opticloud is a community project under MIT license, not an Optimizely product.
+> Optimizely Support will not troubleshoot it — platform-side issues (build failures,
+> environment locks) are supported; CLI bugs go to its GitHub issues.
+
+The legacy path was the PowerShell `EpiCloud` module (`Connect-EpiCloud`,
+`Start-EpiDeployment`). It still works and the two are API-compatible, but it is
+Windows-centric and requires hand-rolling package creation. Only fall back to it if
+opticloud itself is broken; `references/deployment-guide.md` carries the command mapping.
 
 ## Workflow Decision Tree
 
+**User says "Deploy" / "Ship to Test2":**
+1. Confirm credentials are available — `opticloud auth:status`
+2. Confirm the target env's app settings are populated (a missing variable fails the build)
+3. Run `opticloud ship <dir> --type=head --prefix=<name> --target=<env>`
+4. Read `references/deployment-guide.md` if any step needs detail
+
 **User says "Set up frontend hosting":**
-1. Check if environment variables exist in project
-2. If missing, read `references/environment-variables.md` for guidance
-3. Create `.env` file with required variables
-4. Create or update `.zipignore` from `assets/.zipignore.template`
-5. Verify `package.json` has required scripts (see `assets/package.json.template`)
-6. Guide user on obtaining API credentials from PaaS Portal
+1. Obtain API credentials — PaaS Portal > API tab (`references/deployment-guide.md` step 1)
+2. `opticloud auth:login` to store them in the OS keychain
+3. Ensure `package.json` has `build` and `start` scripts (`assets/package.json.template`)
+4. Create `.zipignore` from `assets/.zipignore.template`
+5. Set runtime variables in PaaS Portal > App Settings (`references/environment-variables.md`)
 
-**User says "Deploy to frontend hosting":**
-1. Read `references/deployment-guide.md` for detailed process
-2. Use `scripts/deploy.ps1` for automated deployment
-3. Or guide through manual PowerShell deployment steps
-4. Monitor deployment status
-
-**User says "Configure deployment settings":**
-1. Check current environment variables
-2. Read `references/environment-variables.md` for details
-3. Use `scripts/setup-env.ps1` to configure variables
+**User asks about ISR / caching / stale content:**
+1. Check a shared cache handler is configured — without one, ISR is per-replica (see above)
+2. For implementation, hand off to the `optimizely-cms-nextjs` skill
+3. `references/troubleshooting.md` covers the deployment-side symptoms
 
 **User encounters deployment errors:**
-1. Read `references/troubleshooting.md` for common issues
-2. Check deployment logs
-3. Verify package naming and structure
+1. Read `references/troubleshooting.md`
+2. `opticloud deployment:logs <id>` for the platform-side failure
+3. `opticloud deployment:reset <id>` if an environment is stuck
 
-## Environment Setup
+## Credentials
 
-### Required Environment Variables
+opticloud resolves credentials in this order:
 
-Three environment variables must be set before deployment:
+1. Explicit flags — `--client-key`, `--client-secret`, `--project-id`
+2. Environment variables — `OPTI_CLIENT_KEY`, `OPTI_CLIENT_SECRET`, `OPTI_PROJECT_ID`
+3. OS keychain — populated by `opticloud auth:login`
 
-```powershell
-$env:OPTI_PROJECT_ID = "<your_project_id>"
-$env:OPTI_CLIENT_KEY = "<your_client_key>"
-$env:OPTI_CLIENT_SECRET = "<your_client_secret>"
-```
+**opticloud does not read `.env` files.** It has no dotenv loading; the `OPTI_*` variables
+must already be in the process environment. Storing them in a project `.env` and expecting
+`opticloud ship` to pick them up silently falls through to the keychain — which usually
+works, and so hides the misconception until it runs somewhere without a keychain (CI).
 
-These are obtained from **PaaS Portal > API tab** for your frontend project.
+- **Local development**: `opticloud auth:login` once. Nothing to configure per project.
+- **CI**: export `OPTI_*` from secrets, and add `--skip-validation` to avoid a needless
+  credential round-trip on every run.
 
-For permanent setup, use `scripts/setup-env.ps1` or add to system environment variables.
+Credentials come from **PaaS Portal > API tab** for your frontend project. See
+`references/environment-variables.md` for the full variable reference.
 
-### Project Configuration
+## Project Configuration
 
-Ensure the Next.js project has:
+**`package.json`** must have `build` and `start` — the platform runs them during deployment:
 
-1. **package.json** with required scripts:
 ```json
 {
   "scripts": {
@@ -73,82 +119,40 @@ Ensure the Next.js project has:
 }
 ```
 
-2. **.zipignore** file to exclude:
-   - `.next`
-   - `node_modules`
-   - `.env`
-   - `.git`
-   - `.DS_Store`
-   - `.vscode`
+**`.zipignore`** controls what gets packaged. opticloud excludes some things by default
+(`node_modules/`, `.git/`, `.env`, `.DS_Store`), but **do not rely on that for secrets** —
+the built-in list does not cover every shape a secret takes (`.env.template` with real
+values filled in, `certificates/`, local credential dumps). Keep an explicit `.zipignore`
+and verify it. Syntax is identical to `.gitignore`, including negation.
 
-See `assets/.zipignore.template` for complete example.
+See `assets/.zipignore.template`.
 
-## Deployment Process
+## Target Environments
 
-### Quick Deployment (Automated)
+For **SaaS Frontend Hosting**: `Test1`, `Test2`, `Production`
 
-For automated deployment, use the provided script:
+For **PaaS hosting** (CMS 12): `Integration`, `Preproduction`, `Production`
 
-```powershell
-# From project root
-.\deploy.ps1
-```
-
-The script (located in `scripts/deploy.ps1`):
-- Validates environment variables
-- Creates deployment package with .zipignore support
-- Uploads to Azure
-- Triggers deployment to configured environment
-
-### Manual Deployment Steps
-
-For detailed manual deployment process, read `references/deployment-guide.md`. Summary:
-
-1. **Install EpiCloud module**:
-```powershell
-Install-Module -Name EpiCloud -Scope CurrentUser -Force
-Import-Module EpiCloud
-```
-
-2. **Create deployment package**:
-   - Package name format: `<n>.head.app.<version>.zip`
-   - Example: `myapp.head.app.20250610.zip`
-   - Must include `package.json` at root
-   - Exclude `.next` and `node_modules`
-
-3. **Upload and deploy**:
-```powershell
-Connect-EpiCloud -ProjectId $projectId -ClientKey $clientKey -ClientSecret $clientSecret
-$sasUrl = Get-EpiDeploymentPackageLocation
-Add-EpiDeploymentPackage -SasUrl $sasUrl -Path .\myapp.head.app.20250610.zip
-Start-EpiDeployment -DeploymentPackage "myapp.head.app.20250610.zip" -TargetEnvironment Test1 -DirectDeploy -Wait -Verbose
-```
-
-### Target Environments
-
-For **SaaS Frontend Hosting**, use:
-- `Test1`
-- `Test2`
-- `Production`
-
-For **PaaS hosting** (CMS 12), use:
-- `Integration`
-- `Preproduction`
-- `Production`
+`ship` does not validate `--target` — the string is forwarded to the deployment API as
+typed. A wrong or misspelled environment surfaces as an API error partway through, after
+the package has already been built and uploaded, so use the exact name.
 
 ## Runtime Environment Variables
 
-The following variables are automatically available during build and runtime:
+These are injected by the platform and available at build time and runtime:
 
-- `OPTIMIZELY_CMS_URL` - CMS backend URL
-- `OPTIMIZELY_GRAPH_GATEWAY` - Optimizely Graph endpoint
-- `OPTIMIZELY_GRAPH_SECRET` - Graph authentication secret
-- `OPTIMIZELY_GRAPH_SINGLE_KEY` - Graph single key
-- `OPTIMIZELY_GRAPH_APP_KEY` - Graph app key
+- `OPTIMIZELY_CMS_URL` — CMS backend URL
+- `OPTIMIZELY_GRAPH_GATEWAY` — Optimizely Graph endpoint
+- `OPTIMIZELY_GRAPH_SECRET` — Graph authentication secret
+- `OPTIMIZELY_GRAPH_SINGLE_KEY` — Graph single key
+- `OPTIMIZELY_GRAPH_APP_KEY` — Graph app key
 
-**Important!** the `OPTIMIZELY_GRAPH_GATEWAY` environment variable in the Optimizely Frontend Hosting runtime does not have a path to the Graph API, only the full hostname. Typically this is: `https://cg.optimizely.com` while the Optimizely Content JS SDK needs the full path to the Graph like ``
+**Gotcha — `OPTIMIZELY_GRAPH_GATEWAY` differs between local and hosted.** In the Frontend
+Hosting runtime it is the bare hostname (`https://cg.optimizely.com`), with no path to the
+Graph API. Locally it typically includes the full path (`https://cg.optimizely.com/content/v2`).
+The Content JS SDK needs the full path, so normalize it rather than reading the variable
+directly:
 
-Here is an example library function to use when getting the full path:
 ```typescript
 const DEFAULT_GRAPH_PATH = "/content/v2";
 
@@ -183,50 +187,45 @@ export function getGraphGatewayUrl(): string {
 }
 ```
 
-It is being used like this:
+Used as:
+
 ```typescript
-  const client = new GraphClient(process.env.OPTIMIZELY_GRAPH_SINGLE_KEY!, {
-    graphUrl: getGraphGatewayUrl(),
-  });
+const client = new GraphClient(process.env.OPTIMIZELY_GRAPH_SINGLE_KEY!, {
+  graphUrl: getGraphGatewayUrl(),
+});
 ```
 
-Additional app settings can be configured through the Management Portal UI.
+Additional app settings are configured through the Management Portal UI.
 
 ## Common Tasks
 
-### Check Current Configuration
+```bash
+# Who am I / are credentials valid
+opticloud auth:status
 
-```powershell
-# View environment variables
-echo $env:OPTI_PROJECT_ID
-echo $env:OPTI_CLIENT_KEY
-echo $env:OPTI_CLIENT_SECRET
+# Deploy
+opticloud ship ./ --type=head --prefix=mysite --target=Test2
 
-# Check deployment status
-Get-EpiDeployment
+# Preserve the package instead of using a temp dir (auditing, rollback, debugging)
+opticloud ship ./ --type=head --prefix=mysite --target=Test2 --output=./packages
+
+# Watch deployments
+opticloud deployment:list --watch
+
+# Diagnose a failure
+opticloud deployment:logs <deployment-id> --errors-only
+
+# Unstick an environment
+opticloud deployment:reset <deployment-id>
+
+# Machine-readable output for scripting
+opticloud ship ./ --type=head --target=Test2 --json
 ```
-
-### Update Deployment Script Settings
-
-Edit `scripts/deploy.ps1` to customize:
-- `$sourcePath` - Path to Next.js app
-- `$targetEnvironment` - Target environment name
-
-### Troubleshoot Deployment Issues
-
-For troubleshooting, read `references/troubleshooting.md` which covers:
-- Missing environment variables during build
-- Invalid ZIP package structure
-- Incorrect naming conventions
-- Build failures
-- File exclusion issues
 
 ## Additional Resources
 
-- **scripts/deploy.ps1**: Complete automated deployment script
-- **scripts/setup-env.ps1**: Environment variable configuration helper
-- **references/deployment-guide.md**: Detailed deployment walkthrough
-- **references/troubleshooting.md**: Common issues and solutions
-- **references/environment-variables.md**: Environment configuration details
-- **assets/.zipignore.template**: Template for file exclusions
-- **assets/package.json.template**: Example Next.js package.json
+- **references/deployment-guide.md**: Credentials, the ship workflow, CI/CD, EpiCloud mapping
+- **references/troubleshooting.md**: Failure modes and how to diagnose them
+- **references/environment-variables.md**: Full variable reference, build-time vs runtime
+- **assets/.zipignore.template**: Starting point for package exclusions
+- **assets/package.json.template**: Minimal Next.js package.json for Frontend Hosting

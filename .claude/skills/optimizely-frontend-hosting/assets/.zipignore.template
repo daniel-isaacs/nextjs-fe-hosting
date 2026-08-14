@@ -1,9 +1,21 @@
 # Optimizely Frontend Hosting - .zipignore Template
-# 
-# This file specifies which files and directories should be EXCLUDED from the deployment package
-# Similar to .gitignore, but for deployment packages
-# 
-# Usage: Copy this file to your Next.js project root as ".zipignore"
+#
+# Files and directories EXCLUDED from the deployment package created by
+# `opticloud package:create` / `opticloud ship`.
+#
+# Syntax is identical to .gitignore, including negation (!keep-this.json), but it is
+# evaluated separately from git — a file can be gitignored and still packaged, or tracked
+# in git and excluded here.
+#
+# Usage: copy to your Next.js project root as ".zipignore"
+#
+# NOTE: opticloud already excludes node_modules/, .git/, .env, .env.local and .DS_Store by
+# default. That default is a convenience, NOT a security boundary — it does not catch a
+# .env.template with real values filled in, certificates/, *.pem, or a stray credential
+# dump. List secrets explicitly below and audit the result:
+#
+#   opticloud package:create ./ --type=head --output=./packages
+#   unzip -l ./packages/*.zip | grep -iE '\.env|secret|credential|\.pem|\.key'
 
 # Build outputs (regenerated during deployment)
 .next
@@ -12,13 +24,22 @@ out
 # Dependencies (reinstalled during deployment via package.json)
 node_modules
 
-# Environment files (should be configured in PaaS Portal instead)
+# Environment files (configure these in PaaS Portal > App Settings instead)
 .env
 .env.local
 .env.development
 .env.test
 .env.production
 .env.*.local
+.env.template
+.env.example
+
+# Secrets and certificates — never ship these
+certificates
+*.pem
+*.key
+*.pfx
+*.p12
 
 # Version control
 .git
@@ -33,6 +54,10 @@ node_modules
 *~
 .DS_Store
 Thumbs.db
+
+# Agent / dev tooling (not needed at runtime)
+.claude
+.cursor
 
 # Testing
 coverage
@@ -54,38 +79,30 @@ tmp
 temp
 
 # OS files
-.DS_Store
-Thumbs.db
 desktop.ini
 
-# Optional: Documentation (if you don't want it in production)
-# README.md
-# CONTRIBUTING.md
-# docs/
+# Deployment artifacts (don't package previous packages)
+*.zip
+*.tar.gz
+packages
 
-# Optional: Development tools
+# Documentation
+README.md
+
+# Optional: development tooling (uncomment if not needed at build time)
 # .eslintrc
 # .prettierrc
 # jest.config.js
 # cypress/
 
-# Optional: CI/CD files (usually not needed in deployment)
+# Optional: CI/CD config (uncomment — usually not needed in the package)
 # .github
 # .gitlab-ci.yml
 # azure-pipelines.yml
 # .circleci
 
-# Deployment artifacts (don't include old deployment packages)
-*.zip
-*.tar.gz
-
-# Lock files - KEEP THESE (commented out by default)
-# These should be INCLUDED in your package
-# package-lock.json  # DO NOT IGNORE - needed for npm
-# yarn.lock          # DO NOT IGNORE - needed for yarn
-# pnpm-lock.yaml     # DO NOT IGNORE - needed for pnpm
-
-# Misc
-README.md
-deploy.ps1
-certificates
+# Lock files — DO NOT IGNORE THESE. They must be in the package so the platform
+# installs the same dependency versions you built against:
+#   package-lock.json   (npm)
+#   yarn.lock           (yarn)
+#   pnpm-lock.yaml      (pnpm)

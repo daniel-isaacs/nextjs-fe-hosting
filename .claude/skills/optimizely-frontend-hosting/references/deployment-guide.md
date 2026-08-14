@@ -1,56 +1,82 @@
 # Deployment Guide
 
-Complete guide for deploying Next.js applications to Optimizely Frontend Hosting.
+Deploying a Next.js application to Optimizely Frontend Hosting with the
+[`@kunalshetye/opticloud`](https://github.com/kunalshetye/opticloud) CLI.
 
 ## Prerequisites
 
-1. **Next.js Application**: A working Next.js project with proper configuration
-2. **API Credentials**: Project ID, Client Key, and Client Secret from PaaS Portal
-3. **PowerShell**: PowerShell 5.1 or later (Windows) or PowerShell Core (cross-platform)
-4. **EpiCloud Module**: Will be installed automatically by deployment script
+1. **Next.js application** with `build` and `start` scripts in `package.json`
+2. **API credentials** — Project ID, Client Key, Client Secret from the PaaS Portal
+3. **Node.js 18+** — opticloud is a Node CLI and runs on Windows, macOS, and Linux
 
-## Step 1: Obtain API Credentials
+No PowerShell, no EpiCloud module.
+
+### Installing opticloud
+
+| Approach | Command | When |
+|---|---|---|
+| Project devDependency | `npm i -D @kunalshetye/opticloud` | **Preferred.** Pins the version, so the CLI can't change under you between deploys. Wrap it in an npm script. |
+| npx, no install | `npx @kunalshetye/opticloud <cmd>` | CI, or a one-off deployment |
+| Global | `npm i -g @kunalshetye/opticloud` | Convenience across many projects; version drifts silently |
+
+As a devDependency it costs a little install time on the platform build unless dev
+dependencies are pruned — a fair trade for a pinned deployment tool. Note that opticloud is
+pre-1.0, so `^0.0.x` resolves to an exact version under npm's semver rules; upgrades are
+deliberate.
+
+## Step 1: Obtain API credentials
 
 1. Log into your Optimizely CMS
 2. Navigate to **Product Access** > **Developer Portal (frontend)** > **Details** tab
-3. Confirm that **Opti ID Enabled** is selected
+3. Confirm **Opti ID Enabled** is selected
 4. Go to **Admin Center** > **Users** > {your user} > **Add Product Access**
 5. Ensure you have **Power User** access to the **Developer portal (front end)** product
-6. Click **Developer Portal** from the top navigation or go to https://paasportal.episerver.net/
+6. Click **Developer Portal** from the top navigation, or go to https://paasportal.episerver.net/
 7. Navigate to the **API** tab
 8. Click **Add API Credentials**
-9. Copy the generated:
-   - Project ID
-   - Client Key
-   - Client Secret
-10. Select the environments you want to deploy to (Test1, Test2, Production)
+9. Select the environments you want to deploy to (Test1, Test2, Production)
+10. Copy the Project ID, Client Key, and Client Secret
 
-## Step 2: Configure Environment Variables
+The Client Secret is displayed **once**. If you lose it, generate new credentials.
 
-Option A: Use the setup script (recommended):
-```powershell
-.\setup-env.ps1
+## Step 2: Authenticate
+
+```bash
+opticloud auth:login
 ```
 
-Option B: Set manually for current session:
-```powershell
-$env:OPTI_PROJECT_ID = "<your_project_id>"
-$env:OPTI_CLIENT_KEY = "<your_client_key>"
-$env:OPTI_CLIENT_SECRET = "<your_client_secret>"
+Prompts for Client Key, Client Secret, and Project ID, then stores them in the OS keychain
+(Credential Manager on Windows, Keychain on macOS, libsecret on Linux). One-time setup —
+it is not per project.
+
+```bash
+# Verify
+opticloud auth:status
+
+# Replace credentials
+opticloud auth:logout && opticloud auth:login
 ```
 
-Option C: Set permanently (Windows):
-```powershell
-[System.Environment]::SetEnvironmentVariable("OPTI_PROJECT_ID", "<value>", "User")
-[System.Environment]::SetEnvironmentVariable("OPTI_CLIENT_KEY", "<value>", "User")
-[System.Environment]::SetEnvironmentVariable("OPTI_CLIENT_SECRET", "<value>", "User")
+### Credential resolution order
+
+1. Explicit flags — `--client-key`, `--client-secret`, `--project-id`
+2. Environment variables — `OPTI_CLIENT_KEY`, `OPTI_CLIENT_SECRET`, `OPTI_PROJECT_ID`
+3. OS keychain
+
+**opticloud does not load `.env` files.** The `OPTI_*` variables are read from the process
+environment. Putting them in a project `.env` does nothing on its own — if deployment still
+works, it is falling through to the keychain. That distinction stays invisible until the
+same command runs somewhere without a keychain, such as CI.
+
+To use a `.env` file deliberately, load it explicitly:
+
+```bash
+node --env-file=.env node_modules/.bin/opticloud ship ./ --type=head --target=Test2
 ```
 
-## Step 3: Prepare Your Next.js Project
+## Step 3: Prepare the project
 
-### Required package.json Scripts
-
-Your `package.json` must include these scripts:
+### Required scripts
 
 ```json
 {
@@ -61,255 +87,206 @@ Your `package.json` must include these scripts:
 }
 ```
 
-The `build` script runs during deployment to generate static content and build the application.
-The `start` script starts the Next.js server in production mode.
+The platform runs `npm install` then `build` during deployment, and `start` to serve.
 
-### Create .zipignore File
+### Create `.zipignore`
 
-Create a `.zipignore` file in your project root to exclude unnecessary files:
+Controls what goes into the package. Same syntax as `.gitignore`, including negation
+(`!keep-this.json`). See `assets/.zipignore.template`.
 
-```
-# Build outputs (regenerated during deployment)
-.next
+opticloud already excludes `node_modules/`, `.git/`, `.env`, `.env.local`, and `.DS_Store`
+by default (it keeps `.env.example`). **Do not treat that as your secret-exclusion
+strategy** — the built-in list is a convenience, not a security boundary, and misses things
+like a `.env.template` with real values filled in, `certificates/`, or local credential
+dumps. Write them into `.zipignore` explicitly.
 
-# Dependencies (reinstalled during deployment)
-node_modules
+Verify before shipping:
 
-# Environment files (configured in PaaS Portal)
-.env
-.env.local
-.env.*.local
-
-# Version control
-.git
-.gitignore
-
-# IDE files
-.vscode
-.idea
-*.swp
-*.swo
-.DS_Store
-
-# Testing
-coverage
-.nyc_output
-
-# Misc
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+```bash
+# Create the package without deploying, then inspect it
+opticloud package:create ./ --type=head --prefix=mysite --output=./packages
+unzip -l ./packages/mysite.head.app.*.zip | grep -iE '\.env|secret|credential|\.pem|\.key'
 ```
 
-### Verify Project Structure
+### Lock file
 
-Ensure your project has this structure at minimum:
-```
-your-nextjs-app/
-├── package.json          (required)
-├── .zipignore           (recommended)
-├── next.config.js       (if needed)
-├── public/              (static assets)
-├── src/ or app/         (your Next.js code)
-└── ...other files
-```
+Include `package-lock.json` / `yarn.lock` / `pnpm-lock.yaml` in the package. Without one,
+the platform resolves dependencies fresh at build time and you lose build reproducibility.
 
-## Step 4: Deploy Using Automated Script
+## Step 4: Set environment variables in the portal
 
-### Quick Deployment
+Before the first deploy, populate **PaaS Portal > App Settings** for the target
+environment. The deployment triggers a production build immediately, and a build that
+references a missing variable fails — sometimes leaving the environment locked.
 
-From your project root:
+Optimizely's own variables (`OPTIMIZELY_GRAPH_*`, `OPTIMIZELY_CMS_URL`, `REDIS_URL`, and
+friends) are injected automatically. You only add your own.
 
-```powershell
-# Copy deploy.ps1 from the skill to your project
-# Update $sourcePath in the script if needed
-.\deploy.ps1
+Settings take a few minutes to apply. See `references/environment-variables.md`.
+
+## Step 5: Ship
+
+```bash
+opticloud ship ./ --type=head --prefix=mysite --target=Test2
 ```
 
-The script will:
-1. Validate environment variables
-2. Apply .zipignore exclusions
-3. Create a timestamped deployment package
-4. Upload to Azure BLOB storage
-5. Trigger deployment to configured environment
-6. Wait for deployment completion
+`ship` runs the whole workflow: creates the package, uploads it, starts the deployment,
+polls for progress, and completes it when ready.
 
-### Customize Deployment
+### Required parameters
 
-Edit `deploy.ps1` to change:
+| Parameter | Description |
+|---|---|
+| `<directory>` | Source directory to package (positional) |
+| `--target` / `-t` | Target environment: `Test1`, `Test2`, `Production` |
+| `--type` | Package type — `head` for frontend applications |
 
-```powershell
-# Target environment (line ~25)
-$targetEnvironment = "Test1"  # Change to Test2, Production, etc.
+`--type` also accepts `cms`, `commerce`, and `sqldb`; those are PaaS/CMS 12 concerns. A
+Next.js frontend is always `head`.
 
-# Source path (line ~28) - if script is not in project root
-$sourcePath = "."  # Update to point to your Next.js app
+### Useful options
+
+| Option | Effect |
+|---|---|
+| `--prefix` / `-p` | Package name prefix, for organizing packages |
+| `--version` / `-v` | Package version (defaults to a `YYYYMMDDHHMMSS` timestamp) |
+| `--output` / `-o` | Keep the package in a directory instead of a temp dir |
+| `--poll-interval` | Seconds between status checks (default 10, range 5–300) |
+| `--skip-validation` | Skip the credential pre-check — faster startup, good for CI |
+| `--continue-on-errors` | Keep watching after errors are reported |
+| `--json` | Machine-readable output |
+
+### Package naming
+
+opticloud generates `[prefix.]head.app.[version].zip` automatically — for example
+`mysite.head.app.20250713092332.zip`. The `.head.app.` segment is what tells the platform
+this is a frontend package rather than a .NET one; getting it wrong used to be a common
+manual-deployment failure, and is now handled for you.
+
+### Package storage
+
+By default packages go to the system temp directory and are deleted after a successful
+deployment. Pass `--output=./packages` to keep them — worth doing for production
+deployments, so you have an exact artifact to redeploy for a rollback.
+
+You cannot upload two packages with the same name and different content. Since the default
+version is a timestamp, this only bites when you pass an explicit `--version`.
+
+## Step 6: Monitor
+
+`ship` streams status automatically: `InProgress` → `AwaitingVerification` → `Succeeded`.
+
+```bash
+# All deployments
+opticloud deployment:list
+
+# Live
+opticloud deployment:list --watch --poll-interval=15
+
+# One deployment
+opticloud deployment:list --deployment-id=<id>
+
+# Platform-side logs — the build output lives here
+opticloud deployment:logs <id>
+opticloud deployment:logs <id> --errors-only
+
+# Attach to a deployment already in flight
+opticloud deployment:watch <id>
 ```
 
-## Step 5: Manual Deployment (Alternative)
+Deployments typically take 5–10 minutes, depending on package size, dependency count, and
+build complexity.
 
-If you prefer manual control or need to customize the process:
+## Step 7: Post-deployment configuration
 
-### Install EpiCloud Module
+After the first deployment:
 
-```powershell
-Install-Module -Name EpiCloud -Scope CurrentUser -Force
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-Import-Module EpiCloud
+1. **CMS > Settings > Import Data** — import the content model
+2. **CMS > Settings > Applications** — create an application
+3. **Settings > Applications > {your app} > Hostnames** — add the hostname from the PaaS
+   Portal (e.g. `test1-myapp.cms.optimizely.com`)
+4. **Settings > Scheduled jobs** — reindex content into Optimizely Graph
+
+Without the hostname mapping, Visual Builder cannot resolve the frontend and renders
+nothing.
+
+## CI/CD
+
+Credentials come from environment variables; there is no keychain on a build agent.
+
+```yaml
+- name: Deploy to Frontend Hosting
+  env:
+    OPTI_PROJECT_ID: ${{ secrets.DXP_PROJECT_ID }}
+    OPTI_CLIENT_KEY: ${{ secrets.DXP_CLIENT_KEY }}
+    OPTI_CLIENT_SECRET: ${{ secrets.DXP_CLIENT_SECRET }}
+  run: |
+    npx @kunalshetye/opticloud ship ./ \
+      --type=head \
+      --prefix=mysite \
+      --version=${{ github.sha }} \
+      --target=Production \
+      --skip-validation \
+      --json
 ```
 
-### Create Deployment Package
+Or pass them as flags (`--client-key=$DXP_CLIENT_KEY`) if your CI system prefers that.
 
-1. **Exclude files manually** or use a tool to apply .zipignore
-2. **Create ZIP with specific naming**:
-   - Format: `<name>.head.app.<version>.zip`
-   - Example: `myapp.head.app.20250114.zip`
-   - The `.head.app.` in the name is **critical** - without it, the system treats it as a .NET package
-3. **Verify package contents**:
-   - `package.json` must be at the root of the ZIP
-   - No nested folders containing the application
-   - Does NOT include `.next` or `node_modules`
-   - DOES include `package-lock.json` or `yarn.lock`
+`--json` emits `{ success, deploymentId, packagePath }` for downstream steps. The CLI works
+on any platform with Node — GitLab CI, Azure DevOps, Jenkins, CircleCI.
 
-### Upload and Deploy
+### Multi-environment with a consistent version
 
-```powershell
-# Set configuration
-$projectId = $env:OPTI_PROJECT_ID
-$clientKey = $env:OPTI_CLIENT_KEY
-$clientSecret = $env:OPTI_CLIENT_SECRET
-$targetEnvironment = "Test1"
-$packagePath = ".\myapp.head.app.20250114.zip"
-
-# Connect to Optimizely Cloud
-Connect-EpiCloud -ProjectId $projectId -ClientKey $clientKey -ClientSecret $clientSecret
-
-# Get upload location
-$sasUrl = Get-EpiDeploymentPackageLocation
-
-# Upload package
-Add-EpiDeploymentPackage -SasUrl $sasUrl -Path $packagePath
-
-# Start deployment
-Start-EpiDeployment `
-    -DeploymentPackage "myapp.head.app.20250114.zip" `
-    -TargetEnvironment $targetEnvironment `
-    -DirectDeploy `
-    -Wait `
-    -Verbose
+```bash
+VERSION=$(date +%Y%m%d)
+opticloud ship ./ --type=head --prefix=mysite --version=$VERSION --target=Test1
+opticloud ship ./ --type=head --prefix=mysite --version=$VERSION --target=Test2
+opticloud ship ./ --type=head --prefix=mysite --version=$VERSION --target=Production
 ```
 
-## Step 6: Monitor Deployment
+Deploy to one environment at a time and let each finish — concurrent deployments to the
+same project contend for the same lock.
 
-### Check Status via PowerShell
+## Individual commands
 
-```powershell
-# View all deployments
-Get-EpiDeployment
+`ship` is the recommended path. Use the discrete commands when a step needs isolating —
+inspecting a package before upload, or retrying a deployment against an already-uploaded
+package.
 
-# View specific deployment
-Get-EpiDeployment -Id <deployment-id>
+```bash
+opticloud package:create ./ --type=head --prefix=mysite --version=1.0.0
+opticloud package:upload ./mysite.head.app.1.0.0.zip
+opticloud package:list
 
-# View as JSON for detailed information
-Get-EpiDeployment -Id <deployment-id> | ConvertTo-Json
+opticloud deployment:start --target=Test2 --packages=mysite.head.app.1.0.0.zip --watch
+opticloud deployment:complete <id>
+opticloud deployment:reset <id>
 ```
 
-### Check Status in PaaS Portal
+## Legacy: EpiCloud PowerShell module
 
-1. Navigate to https://paasportal.episerver.net/
-2. Select your frontend project
-3. Go to the **Deployment** tab
-4. View **Recent Deployments** list
-5. Click on a deployment to see detailed logs
-6. Check for success or error messages
+The predecessor was the `EpiCloud` PowerShell module. It still works and hits the same API,
+so packages and deployments are interchangeable. It requires Windows PowerShell in
+practice, and package creation is manual — which is where most of the historical failure
+modes came from.
 
-## Step 7: Post-Deployment Configuration
+| EpiCloud | opticloud |
+|---|---|
+| `Connect-EpiCloud` | `auth:login` |
+| `Get-EpiDeployment` | `deployment:list` |
+| `Start-EpiDeployment` | `deployment:start` |
+| `Complete-EpiDeployment` | `deployment:complete` |
+| `Reset-EpiDeployment` | `deployment:reset` |
+| `Add-EpiDeploymentPackage` | `package:upload` |
+| *(manual ZIP creation)* | `package:create` |
+| *(the whole sequence)* | **`ship`** |
+| `Start-EpiDatabaseExport` | `database:export` |
+| `Get-EpiEdgeLogLocation` | `logs:edge` |
 
-### Configure Visual Builder
+Only fall back to EpiCloud if opticloud itself is broken.
 
-After first deployment:
+## Next steps
 
-1. Go to **CMS > Settings > Import Data** to import content model
-2. Go to **CMS > Settings > Applications** to create an application
-3. Deploy your frontend (you just did this!)
-4. Go to **Settings > Applications > Select your app > Hostnames**
-5. Click **Add hostname** and enter the hostname from PaaS Portal
-6. Go to **Settings > Scheduled jobs** to reindex content in Optimizely Graph
-
-### Set Application Settings
-
-In the PaaS Portal, **App Settings** tab:
-1. Add any custom environment variables your app needs
-2. These are available during build and runtime
-3. Examples: API keys, feature flags, custom configuration
-
-## Deployment Options
-
-### DirectDeploy
-
-For faster deployments to non-production environments:
-
-```powershell
-Start-EpiDeployment ... -DirectDeploy
-```
-
-Deploys directly to the Web App without slot swap. Available for:
-- Test1
-- Test2
-- Integration (PaaS)
-- Development (PaaS)
-
-### Wait for Completion
-
-```powershell
-Start-EpiDeployment ... -Wait
-```
-
-Blocks until deployment completes. Useful for CI/CD pipelines.
-
-### Verbose Logging
-
-```powershell
-Start-EpiDeployment ... -Verbose
-```
-
-Shows detailed progress information during deployment.
-
-## Target Environment Names
-
-### SaaS Frontend Hosting (SaaS CMS)
-- `Test1`
-- `Test2`
-- `Production`
-
-### PaaS Hosting (CMS 12)
-- `Integration`
-- `Preproduction`
-- `Production`
-
-## Package Versioning
-
-Best practices for package versions:
-
-```powershell
-# Timestamp-based (recommended for automation)
-myapp.head.app.20250114-153045.zip
-
-# Semantic versioning
-myapp.head.app.1.0.0.zip
-myapp.head.app.1.0.1.zip
-myapp.head.app.1.1.0.zip
-
-# Build number
-myapp.head.app.build-123.zip
-```
-
-**Important**: Cannot upload a package with the same name unless the content is identical (matching checksum).
-
-## Next Steps
-
-- See `troubleshooting.md` for common issues and solutions
-- See `environment-variables.md` for detailed configuration options
-- Configure monitoring and logging in PaaS Portal
-- Set up CI/CD pipeline for automated deployments
+- `references/troubleshooting.md` — failure modes and diagnosis
+- `references/environment-variables.md` — full variable reference
+- The `optimizely-cms-nextjs` skill — ISR implementation, cache handler, revalidation webhook

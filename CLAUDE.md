@@ -15,7 +15,7 @@ npm run lint                 # ESLint (flat config, core-web-vitals + typescript
 npm run cms:login            # Authenticate with Optimizely CMS CLI
 npm run cms:push-config      # Push content type definitions to CMS
 npm run cms:push-config-force  # Force push (overwrites existing types)
-npm run deploy-test2         # Deploy to Test2 (opticloud ship; requires OPTI_* env vars in .env)
+npm run deploy-test2         # Deploy to Test2 (opticloud ship; credentials from `opticloud auth:login`)
 npm run lh                   # Lighthouse on Test2 (test.contentgurus.no/en), median of 3, stores result
 npm run lh:trim              # Agent-friendly markdown summary of the latest Lighthouse report
 npm run lh:history           # Score trend across runs (▲/▼ deltas)
