@@ -1,48 +1,32 @@
 // OpenTelemetry setup for the Node.js runtime, loaded from register() in
 // instrumentation.ts. Registering global providers is what switches on the
 // spans Next.js emits (routes, rendering, fetch) and the spans and metrics of
-// @optimizely/cms-sdk (Graph requests, content fetches), which are no-ops
-// otherwise.
+// @optimizely/cms-sdk (Graph requests, content fetches, component rendering),
+// which are no-ops otherwise.
 //
 // Exports over OTLP/HTTP to OTEL_EXPORTER_OTLP_ENDPOINT; the exporters append
 // /v1/traces and /v1/metrics themselves. Locally that's the Aspire Dashboard
 // (see .env.template).
 //
-// Render-time telemetry is switched off. The CMS SDK records a span and two
-// metrics each time <OptimizelyComponent> resolves a component, i.e. while
-// React renders, outside any 'use cache' scope. Starting a recording span and
-// recording a metric both read Date.now(), which cacheComponents rejects during
-// prerendering ("encountered the unstable value `Date.now()`"): an error on
-// every page in dev, and a failed prerender at build time. So the sampler drops
-// those spans (a dropped span never reads the clock) and the SDK's meter hands
-// out no-op instruments for them. Graph and content-fetch telemetry runs inside
-// the cached getPageContent() and is kept.
+// The CMS SDK's component metrics (optimizely.component.*) are switched off.
+// They're recorded while <OptimizelyComponent> renders, and recording a metric
+// reads Date.now(), which cacheComponents rejects while prerendering the static
+// shell. In production that fails the prerender and every CMS page returns 500;
+// in dev it logs "encountered the unstable value `Date.now()`". Spans are not
+// affected: Next.js runs span creation outside the prerender scope, but it does
+// no such thing for metrics. The component spans still carry the same timing.
 
 import { metrics, createNoopMeter } from '@opentelemetry/api';
-import type { Attributes, Context, Link, Meter, MeterProvider, SpanKind } from '@opentelemetry/api';
-import { NodeSDK, resources, tracing } from '@opentelemetry/sdk-node';
+import type { Meter, MeterProvider } from '@opentelemetry/api';
+import { NodeSDK, resources } from '@opentelemetry/sdk-node';
 import { MeterProvider as SdkMeterProvider, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-http';
 
-const RENDER_SPANS = new Set(['optimizely.react.render_component', 'optimizely.component.resolve']);
 const RENDER_METRIC_PREFIX = 'optimizely.component.';
 // Matches the SDK's METER_NAME. Not imported: loading the SDK's telemetry
 // module creates its instruments, which must wait until the provider is set.
 const CMS_SDK_METER = '@optimizely/cms-sdk';
-
-class SkipRenderSpansSampler implements tracing.Sampler {
-  private readonly inner = new tracing.ParentBasedSampler({ root: new tracing.AlwaysOnSampler() });
-
-  shouldSample(context: Context, traceId: string, name: string, kind: SpanKind, attributes: Attributes, links: Link[]) {
-    if (RENDER_SPANS.has(name)) return { decision: tracing.SamplingDecision.NOT_RECORD };
-    return this.inner.shouldSample(context, traceId, name, kind, attributes, links);
-  }
-
-  toString() {
-    return 'SkipRenderSpansSampler';
-  }
-}
 
 // Passes everything through, except that the CMS SDK's meter returns no-op
 // histograms and counters for the render-time metrics.
@@ -83,7 +67,6 @@ export function startTelemetry() {
 
   new NodeSDK({
     resource,
-    sampler: new SkipRenderSpansSampler(),
     traceExporter: new OTLPTraceExporter(),
   }).start();
 }
