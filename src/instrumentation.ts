@@ -28,6 +28,13 @@ export async function register() {
     // Before anything calls fetch(): caps every server-side request at 10 s.
     const { setFetchTimeout } = await import("./lib/fetch-timeout");
     setFetchTimeout();
+    // One line per process start, so restarts show up in Application Insights
+    // (a restart doesn't change the instance ID).
+    console.log(
+      `[startup] pid ${process.pid}, node ${process.version}, ` +
+        `env ${process.env.OPTIMIZELY_ENVIRONMENT ?? "local"}, ` +
+        `instance ${process.env.WEBSITE_INSTANCE_ID?.slice(0, 8) ?? "local"}`,
+    );
   }
 
   const gateway = (process.env.OPTIMIZELY_GRAPH_GATEWAY ?? "https://cg.optimizely.com").replace(/\/+$/, "");

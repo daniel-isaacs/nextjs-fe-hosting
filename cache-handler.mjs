@@ -9,6 +9,7 @@
 import { createCluster } from "redis";
 import { EntraIdCredentialsProviderFactory, REDIS_SCOPE_DEFAULT } from "@redis/entraid";
 import { ManagedIdentityCredential } from "@azure/identity";
+import { metrics } from "@opentelemetry/api";
 
 // Cache key prefix — namespaced per deployment slot to prevent collisions
 const deploymentId = process.env.OPTIMIZELY_DXP_DEPLOYMENT_ID ?? "default";
@@ -19,6 +20,38 @@ let connectionFailedUntil = 0;
 
 // In-memory fallback when Redis is unavailable (local dev, connection failure)
 const memoryCache = new Map();
+
+// Telemetry (see docs/observability.md). The meter is fetched on first use, not
+// at module load: this module can load before instrumentation.ts registers the
+// meter provider, and the metrics API doesn't hand out a proxy that would
+// switch over later. Without a provider (telemetry off) these are no-ops.
+//
+// - cache.lookups: every get(), by entry kind, store (redis, memory) and
+//   result (hit, miss, revalidated = found but invalidated by a tag).
+// - cache.redis.duration: Redis round-trip time in ms, by operation.
+// - cache.redis.fallbacks: times the in-memory cache stood in for Redis, by
+//   reason (unavailable, operation_failed).
+//
+// Recording a metric reads Date.now(), which Next.js rejects inside a page
+// prerender. The handler is safe: Next.js calls it outside that scope, and
+// getClient() has always read Date.now() on every call.
+let instruments = null;
+function telemetry() {
+  if (!instruments) {
+    const meter = metrics.getMeter("cache-handler");
+    instruments = {
+      lookups: meter.createCounter("cache.lookups", { description: "Cache handler get() calls" }),
+      redisDuration: meter.createHistogram("cache.redis.duration", {
+        description: "Redis round-trip time per cache operation",
+        unit: "ms",
+      }),
+      fallbacks: meter.createCounter("cache.redis.fallbacks", {
+        description: "Cache operations served by the in-memory fallback instead of Redis",
+      }),
+    };
+  }
+  return instruments;
+}
 
 async function getClient() {
   if (Date.now() < connectionFailedUntil) return null;
@@ -35,7 +68,7 @@ async function getClient() {
     ]);
     return result;
   } catch (err) {
-    console.warn("Redis unavailable, falling back to in-memory cache:", err?.message);
+    console.warn("[cache] Redis unavailable, falling back to in-memory cache:", err?.message);
     connectionFailedUntil = Date.now() + 60_000;
     cluster = null;
     return null;
@@ -144,14 +177,22 @@ function deserializeEntry(raw) {
   });
 }
 
-async function withFallback(operation) {
+async function withFallback(name, operation) {
   const redis = await getClient();
-  if (!redis) return null;
+  if (!redis) {
+    // Local dev has no Redis at all; only count a real outage.
+    if (process.env.REDIS_URL) telemetry().fallbacks.add(1, { operation: name, reason: "unavailable" });
+    return null;
+  }
+  const started = performance.now();
   try {
     return await operation(redis);
   } catch (err) {
     console.error("[cache] Redis operation failed, using in-memory fallback:", err.message);
+    telemetry().fallbacks.add(1, { operation: name, reason: "operation_failed" });
     return null;
+  } finally {
+    telemetry().redisDuration.record(performance.now() - started, { operation: name });
   }
 }
 
@@ -193,35 +234,43 @@ function isRevalidated(tagTimes, lastModified) {
 
 export default class CacheHandler {
   async get(key, ctx) {
-    const fromRedis = await withFallback(async (redis) => {
+    const fromRedis = await withFallback("get", async (redis) => {
       const raw = await redis.get(`${CACHE_PREFIX}${key}`);
-      if (!raw) return { entry: null };
+      if (!raw) return { entry: null, result: "miss" };
       const entry = deserializeEntry(raw);
       const tags = entryTags(entry, ctx);
       if (tags.length > 0 && isRevalidated(await redis.hmGet(TAGS_KEY, tags), entry.lastModified)) {
-        return { entry: null };
+        return { entry: null, result: "revalidated" };
       }
-      return { entry };
+      return { entry, result: "hit" };
     });
 
     let entry;
+    let result;
     if (fromRedis) {
-      entry = fromRedis.entry;
+      ({ entry, result } = fromRedis);
     } else {
       entry = memoryCache.get(key) ?? null;
+      result = entry ? "hit" : "miss";
       const tags = entry ? entryTags(entry, ctx) : [];
       if (entry && isRevalidated(tags.map((t) => memoryTagTimes.get(t)), entry.lastModified)) {
         memoryCache.delete(key);
         entry = null;
+        result = "revalidated";
       }
     }
+    telemetry().lookups.add(1, {
+      kind: ctx?.kind ?? entry?.value?.kind ?? "unknown",
+      store: fromRedis ? "redis" : "memory",
+      result,
+    });
     return entry ? { value: entry.value, lastModified: entry.lastModified } : null;
   }
 
   async set(key, value, context) {
     const tags = context?.tags ?? [];
     const entry = { value, lastModified: Date.now(), tags };
-    const stored = await withFallback(async (redis) => {
+    const stored = await withFallback("set", async (redis) => {
       const serialized = serializeEntry(entry);
       const ttl = context?.revalidate;
       if (ttl && typeof ttl === "number") {
@@ -243,7 +292,7 @@ export default class CacheHandler {
     // Always record locally too, so this instance is consistent even if the
     // Redis write fails.
     for (const tag of tagList) memoryTagTimes.set(tag, now);
-    await withFallback(async (redis) => {
+    await withFallback("revalidateTag", async (redis) => {
       await redis.hSet(TAGS_KEY, Object.fromEntries(tagList.map((t) => [t, String(now)])));
       return true;
     });

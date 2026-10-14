@@ -8,8 +8,14 @@
 //
 // Always returns 200 (with `received: true` or an `error` field) so
 // Optimizely doesn't retry on transient downstream failures.
+//
+// Each publish is traced as a `graph.webhook` span (see docs/observability.md)
+// with what was published, the path it resolved to, how many cache tags were
+// revalidated and which CDN purge followed, plus one log line. That answers
+// "why isn't my published change showing?" from Application Insights.
 
 import { NextRequest, NextResponse } from "next/server";
+import { SpanStatusCode, trace } from "@opentelemetry/api";
 import { revalidatePath, revalidateTag } from "next/cache";
 import { purgeCdnCache } from "@/lib/cdn-cache";
 import { CACHE_KEYS, getArticlesUnderTag, getPageTag, getSiteSettingsTag } from "@/lib/cache/cache-keys";
@@ -20,6 +26,14 @@ const CALLBACK_API_KEY = process.env.OPTIMIZELY_GRAPH_CALLBACK_APIKEY;
 const singleKey = process.env.OPTIMIZELY_GRAPH_SINGLE_KEY!;
 const gateway = (process.env.OPTIMIZELY_GRAPH_GATEWAY ?? "https://cg.optimizely.com").replace(/\/+$/, "");
 const graphUrl = `${gateway}/content/v2`;
+
+const tracer = trace.getTracer("nextjs-fe-hosting");
+
+// revalidateTag() that also counts, for the span.
+function revalidateTags(tags: string[], profile: string, revalidated: string[]) {
+  for (const tag of tags) revalidateTag(tag, profile);
+  revalidated.push(...tags);
+}
 
 async function graphRequest(query: string, variables: Record<string, unknown>) {
   const res = await fetch(graphUrl, {
@@ -47,6 +61,8 @@ const SITE_SETTINGS_FULL_PURGE = "__full_purge__" as const;
  *
  *  docId format: `{UUID}_{language}_Published` */
 async function revalidateDocId(docId: string): Promise<string> {
+  const span = trace.getActiveSpan();
+  const revalidated: string[] = [];
   const parts = docId.split("_");
   const id = parts[0].replaceAll("-", "");
   const locale = parts[1];
@@ -62,11 +78,12 @@ async function revalidateDocId(docId: string): Promise<string> {
   );
   const meta = response?._Content?.item?._metadata;
   const types: string[] = meta?.types ?? [];
+  span?.setAttributes({ "content.locale": locale, "content.types": types.join(",") });
 
   // Always purge the LLM index — any page edit can change a title, ingress,
   // body, or the noIndex flag, all of which feed /llms.txt and
   // /llms-full.txt. Re-filling costs one Graph round-trip on the next request.
-  revalidateTag(CACHE_KEYS.LLMS_INDEX, "max");
+  revalidateTags([CACHE_KEYS.LLMS_INDEX], "max", revalidated);
 
   // SiteSettings is a singleton fetched per locale and sits outside the URL
   // tree. On a SiteSettings publish, purge every locale's settings cache so
@@ -81,17 +98,19 @@ async function revalidateDocId(docId: string): Promise<string> {
   // site-wide immediately. This is heavy but settings publishes are rare.
   const isSiteSettings = types.includes("SiteSettings");
   if (isSiteSettings) {
-    for (const l of routing.locales) {
-      revalidateTag(getSiteSettingsTag(l), "max");
-    }
+    revalidateTags(routing.locales.map(getSiteSettingsTag), "max", revalidated);
     // Drops the prerendered shell for the entire app (root layout included),
     // so the next request to any path re-renders with the current snippet ID.
     revalidatePath("/", "layout");
+    span?.setAttributes({ "content.path": "/", "cache.tags_revalidated": revalidated.length });
     return SITE_SETTINGS_FULL_PURGE;
   }
 
   const url = meta?.url?.default;
-  if (!url) return "";
+  if (!url) {
+    span?.setAttribute("cache.tags_revalidated", revalidated.length);
+    return "";
+  }
   const path = url.endsWith("/") ? url.slice(0, -1) : url;
   revalidatePath(path || "/");
 
@@ -101,7 +120,7 @@ async function revalidateDocId(docId: string): Promise<string> {
   // person lookup both tag their 'use cache' entries with getPageTag(); a
   // PersonElement embedded in another page is only reachable via this tag,
   // not via revalidatePath() of the person's own route.
-  revalidateTag(getPageTag(segments), "max");
+  revalidateTags([getPageTag(segments)], "max", revalidated);
 
   // Also invalidate any ArticleListBlock caches that include this URL as a
   // descendant. For `/no/blog/my-post`, candidate parents are `/no/` and
@@ -111,14 +130,15 @@ async function revalidateDocId(docId: string): Promise<string> {
     const parent = `/${segments.slice(0, i).join("/")}/`;
     // 'max' matches the cacheLife profile inside getArticlesUnder so the
     // re-filled cache entry behaves the same as before invalidation.
-    revalidateTag(getArticlesUnderTag(parent, locale), "max");
+    revalidateTags([getArticlesUnderTag(parent, locale)], "max", revalidated);
   }
 
   // Sitemap is cached for an hour and tagged with PATHS — any publish should
   // re-fill it with the new page included. 'hours' matches the cacheLife
   // profile inside getAllContentPaths.
-  revalidateTag(CACHE_KEYS.PATHS, "hours");
+  revalidateTags([CACHE_KEYS.PATHS], "hours", revalidated);
 
+  span?.setAttributes({ "content.path": path || "/", "cache.tags_revalidated": revalidated.length });
   return path || "/";
 }
 
@@ -128,9 +148,29 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   const payload = await request.json();
+  return tracer.startActiveSpan("graph.webhook", async (span) => {
+    try {
+      return await handlePublish(payload);
+    } catch (err) {
+      span.recordException(err as Error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: err instanceof Error ? err.message : String(err) });
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
+}
+
+async function handlePublish(payload: { type: { subject: string; action: string }; data?: { docId?: string } }) {
+  const span = trace.getActiveSpan();
   const { subject, action } = payload.type;
-  if (subject === "doc" && (action === "updated" || action === "expired")) {
-    const path = await revalidateDocId(payload.data.docId);
+  const docId = payload.data?.docId;
+  span?.setAttributes({ "webhook.subject": subject, "webhook.action": action, "webhook.doc_id": docId ?? "" });
+  if (subject === "doc" && (action === "updated" || action === "expired") && docId) {
+    const path = await revalidateDocId(docId);
+    const purge = path === SITE_SETTINGS_FULL_PURGE ? "full" : path ? "single" : "none";
+    span?.setAttribute("cdn.purge", purge);
+    console.log(`[hooks] ${action} ${docId}: ${path === SITE_SETTINGS_FULL_PURGE ? "site settings" : path || "no URL"}, CDN purge ${purge}`);
     if (path === SITE_SETTINGS_FULL_PURGE) {
       // SiteSettings changed → purge the whole CDN. The edge-cache purge API
       // takes exact URLs (no wildcard), so enumerate every public path and

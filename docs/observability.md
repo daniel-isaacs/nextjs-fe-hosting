@@ -43,6 +43,37 @@ We use the Azure exporters, not Azure's `useAzureMonitor()` distro. The
 distro registers its own metrics provider, which would bypass the
 component-metric filter described below.
 
+## Our own telemetry
+
+The SDK's telemetry only covers what happens when the page has to be rendered.
+That's a minority of requests here, because most pages come from the cache.
+So the app adds three things of its own, all outside page rendering, where
+they cost next to nothing:
+
+| What | Where | Answers |
+|---|---|---|
+| `cache.lookups` counter, by `kind` (`APP_PAGE`, `APP_ROUTE`, …), `store` (`redis`, `memory`) and `result` (`hit`, `miss`, `revalidated`) | [`cache-handler.mjs`](../cache-handler.mjs) | The cache hit rate, which the SDK can't tell you. `revalidated` means the entry was found but a publish had invalidated it |
+| `cache.redis.duration` histogram (ms) by `operation`, and `cache.redis.fallbacks` counter by `reason` (`unavailable`, `operation_failed`) | `cache-handler.mjs` | Whether Redis is slow or failing, and when the in-memory fallback is serving instead |
+| `graph.webhook` span with `webhook.doc_id`, `content.path`, `content.types`, `cache.tags_revalidated` and `cdn.purge` (`single`, `full`, `none`), plus a `[hooks]` log line | [`/hooks/graph`](../src/app/hooks/graph/route.ts) | "Why isn't my published change showing?" |
+| A `[startup]` log line with process ID, Node version, environment and instance | [`instrumentation.ts`](../src/instrumentation.ts) | When a process restarted. A restart doesn't change the instance ID, so this is the only way to see it |
+
+Custom metrics land in `customMetrics` in Application Insights, with their
+attributes in `customDimensions`:
+
+```kusto
+// Cache hit rate per hour
+customMetrics
+| where name == "cache.lookups"
+| extend result = tostring(customDimensions.result), store = tostring(customDimensions.store)
+| summarize lookups = sum(valueSum) by bin(timestamp, 1h), result, store
+
+// Publishes
+dependencies
+| where name == "graph.webhook"
+| project timestamp, path = tostring(customDimensions["content.path"]),
+    tags = toint(customDimensions["cache.tags_revalidated"]), purge = tostring(customDimensions["cdn.purge"])
+```
+
 ## Running it locally
 
 Start the Aspire Dashboard in Docker:
