@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@azure/identity": "^4.13.3",
+    "@azure/monitor-opentelemetry-exporter": "^1.0.0-beta.32",
     "@opentelemetry/exporter-metrics-otlp-http": "^0.223.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.223.0",
     "@opentelemetry/sdk-metrics": "^2.12.0",

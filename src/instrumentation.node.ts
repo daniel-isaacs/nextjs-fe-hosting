@@ -4,9 +4,15 @@
 // @optimizely/cms-sdk (Graph requests, content fetches, component rendering),
 // which are no-ops otherwise.
 //
-// Exports over OTLP/HTTP to OTEL_EXPORTER_OTLP_ENDPOINT; the exporters append
-// /v1/traces and /v1/metrics themselves. Locally that's the Aspire Dashboard
-// (see .env.template).
+// Where it goes:
+// - APPLICATIONINSIGHTS_CONNECTION_STRING set (Frontend Hosting provides it):
+//   Azure Monitor / Application Insights. Server spans become Requests, client
+//   spans (Graph fetches) Dependencies. We use the Azure exporters rather than
+//   the useAzureMonitor() distro, which registers its own MeterProvider and
+//   would bypass skipRenderMetrics() below.
+// - Otherwise OTLP/HTTP to OTEL_EXPORTER_OTLP_ENDPOINT; the exporters append
+//   /v1/traces and /v1/metrics themselves. Locally that's the Aspire Dashboard
+//   (see .env.template).
 //
 // The CMS SDK's component metrics (optimizely.component.*) are switched off.
 // They're recorded while <OptimizelyComponent> renders, and recording a metric
@@ -22,6 +28,7 @@ import { NodeSDK, resources } from '@opentelemetry/sdk-node';
 import { MeterProvider as SdkMeterProvider, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-http';
+import { AzureMonitorMetricExporter, AzureMonitorTraceExporter } from '@azure/monitor-opentelemetry-exporter';
 
 const RENDER_METRIC_PREFIX = 'optimizely.component.';
 // Matches the SDK's METER_NAME. Not imported: loading the SDK's telemetry
@@ -49,24 +56,41 @@ function skipRenderMetrics(provider: MeterProvider): MeterProvider {
   };
 }
 
+function createExporters() {
+  const connectionString = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING;
+  if (connectionString) {
+    return {
+      traceExporter: new AzureMonitorTraceExporter({ connectionString }),
+      metricExporter: new AzureMonitorMetricExporter({ connectionString }),
+      metricIntervalMillis: 60_000,
+    };
+  }
+  return {
+    traceExporter: new OTLPTraceExporter(),
+    metricExporter: new OTLPMetricExporter(),
+    metricIntervalMillis: 10_000,
+  };
+}
+
 export function startTelemetry() {
-  const resource = resources
-    .defaultResource()
-    .merge(resources.resourceFromAttributes({ 'service.name': process.env.OTEL_SERVICE_NAME ?? 'nextjs-fe-hosting' }));
+  // service.name is App Insights' cloud role name, service.instance.id its role
+  // instance (which replica served the request).
+  const resource = resources.defaultResource().merge(
+    resources.resourceFromAttributes({
+      'service.name': process.env.OTEL_SERVICE_NAME ?? 'nextjs-fe-hosting',
+      'service.instance.id': process.env.WEBSITE_INSTANCE_ID,
+      'deployment.environment.name': process.env.OPTIMIZELY_ENVIRONMENT,
+    }),
+  );
+  const { traceExporter, metricExporter, metricIntervalMillis } = createExporters();
 
   const meterProvider = new SdkMeterProvider({
     resource,
-    readers: [
-      new PeriodicExportingMetricReader({
-        exporter: new OTLPMetricExporter(),
-        exportIntervalMillis: 10_000,
-      }),
-    ],
+    readers: [new PeriodicExportingMetricReader({ exporter: metricExporter, exportIntervalMillis: metricIntervalMillis })],
   });
   metrics.setGlobalMeterProvider(skipRenderMetrics(meterProvider));
 
-  new NodeSDK({
-    resource,
-    traceExporter: new OTLPTraceExporter(),
-  }).start();
+  // Empty metricReaders/logRecordProcessors, or NodeSDK adds its own default
+  // OTLP metric and log exporters (to localhost:4318) on top of ours.
+  new NodeSDK({ resource, traceExporter, metricReaders: [], logRecordProcessors: [] }).start();
 }

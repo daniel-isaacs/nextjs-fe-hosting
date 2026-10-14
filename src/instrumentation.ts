@@ -14,7 +14,12 @@
 export async function register() {
   // Telemetry first, so the webhook registration below is traced too. Loaded
   // dynamically and only on Node, keeping the OTel SDK out of the edge bundle.
-  if (process.env.NEXT_RUNTIME === "nodejs" && process.env.OTEL_EXPORTER_OTLP_ENDPOINT) {
+  // Off unless there's somewhere to send it: App Insights on Frontend Hosting,
+  // or an OTLP endpoint locally.
+  if (
+    process.env.NEXT_RUNTIME === "nodejs" &&
+    (process.env.APPLICATIONINSIGHTS_CONNECTION_STRING || process.env.OTEL_EXPORTER_OTLP_ENDPOINT)
+  ) {
     const { startTelemetry } = await import("./instrumentation.node");
     startTelemetry();
   }
