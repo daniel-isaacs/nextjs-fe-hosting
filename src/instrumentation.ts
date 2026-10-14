@@ -24,6 +24,12 @@ export async function register() {
     startTelemetry();
   }
 
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    // Before anything calls fetch(): caps every server-side request at 10 s.
+    const { setFetchTimeout } = await import("./lib/fetch-timeout");
+    setFetchTimeout();
+  }
+
   const gateway = (process.env.OPTIMIZELY_GRAPH_GATEWAY ?? "https://cg.optimizely.com").replace(/\/+$/, "");
   const appKey = process.env.OPTIMIZELY_GRAPH_APP_KEY;
   const secret = process.env.OPTIMIZELY_GRAPH_SECRET;

@@ -21,7 +21,10 @@ import '@/lib/optimizely/graph-config';
  * Returns null when no content matches the path. Errors are swallowed
  * (returns null) so a transient Graph outage doesn't surface as a
  * HANGING_PROMISE_REJECTION during prerender — the caller decides whether
- * to render notFound() or something else.
+ * to render notFound() or something else. That null is cached only for
+ * seconds, not indefinitely: otherwise one failed or timed-out Graph call
+ * (see src/lib/fetch-timeout.ts) would serve a 404 for the page until its
+ * next publish.
  *
  * Special case: the placeholder slug used by getAllPagesPaths to satisfy
  * Cache Components' "must return ≥1 entry" rule short-circuits without
@@ -30,24 +33,31 @@ import '@/lib/optimizely/graph-config';
  */
 export async function getPageContent(slug: string[]) {
   'use cache';
-  if (process.env.NODE_ENV === 'production') {
-    cacheLife('max');
-  } else {
-    cacheLife('minutes');
-  }
   cacheTag(getPageTag(slug));
 
   if (slug.includes(PLACEHOLDER_SLUG_SEGMENT)) {
+    cacheForSuccess();
     return null;
   }
 
+  // Exactly one cacheLife() call per invocation, chosen by outcome.
   try {
     const client = getClient();
     const path = `/${slug.join('/')}/`;
     const items = await client.getContentByPath(path);
+    cacheForSuccess();
     return items?.[0] ?? null;
   } catch (e) {
+    cacheLife('seconds');
     console.error('[get-page] graph lookup failed:', e);
     return null;
+  }
+}
+
+function cacheForSuccess() {
+  if (process.env.NODE_ENV === 'production') {
+    cacheLife('max');
+  } else {
+    cacheLife('minutes');
   }
 }
