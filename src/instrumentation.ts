@@ -12,6 +12,13 @@
 // — local dev runs without these env vars and should not error.
 
 export async function register() {
+  // Telemetry first, so the webhook registration below is traced too. Loaded
+  // dynamically and only on Node, keeping the OTel SDK out of the edge bundle.
+  if (process.env.NEXT_RUNTIME === "nodejs" && process.env.OTEL_EXPORTER_OTLP_ENDPOINT) {
+    const { startTelemetry } = await import("./instrumentation.node");
+    startTelemetry();
+  }
+
   const gateway = (process.env.OPTIMIZELY_GRAPH_GATEWAY ?? "https://cg.optimizely.com").replace(/\/+$/, "");
   const appKey = process.env.OPTIMIZELY_GRAPH_APP_KEY;
   const secret = process.env.OPTIMIZELY_GRAPH_SECRET;
