@@ -10,7 +10,8 @@ export const metadata = {
 // useful on Frontend Hosting, where most of them are injected by the
 // platform. Values are classified per variable: public ones are shown as-is,
 // secrets are masked to their first and last four characters, and tenant
-// identifiers only show whether they're set. Don't promote a variable to a
+// identifiers only show whether they're set. Variables not listed below are
+// shown by name only. Don't promote a variable to a
 // less-masked group without checking what its value contains.
 //
 // Must render per request: without `connection()` the page would be
@@ -61,6 +62,13 @@ const GROUPS: Group[] = [
       { name: 'REDIS_URL', kind: 'masked' },
       { name: 'OPTIMIZELY_CLOUDPLATFORM_API_URL', kind: 'public' },
       { name: 'OPTIMIZELY_CLOUDPLATFORM_API_RESOURCE_ID', kind: 'masked' },
+    ],
+  },
+  {
+    title: 'Observability',
+    rows: [
+      { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', kind: 'masked' },
+      { name: 'OTEL_EXPORTER_OTLP_ENDPOINT', kind: 'public' },
     ],
   },
   {
@@ -126,7 +134,25 @@ async function EnvTable() {
           </table>
         </section>
       ))}
+      <OtherVariables />
     </div>
+  );
+}
+
+// Everything the instance has that isn't in GROUPS, by name only — values are
+// never shown, since nothing is known about what they contain. Use it to spot
+// variables the platform injects; promote one into GROUPS to see its value.
+function OtherVariables() {
+  const known = new Set(GROUPS.flatMap((group) => group.rows.map((row) => row.name)));
+  const names = Object.keys(process.env)
+    .filter((name) => !known.has(name))
+    .sort();
+
+  return (
+    <section>
+      <h2 className="text-lg font-semibold mb-2">Other variables (names only)</h2>
+      <p className="font-mono text-sm break-all">{names.join(', ')}</p>
+    </section>
   );
 }
 
