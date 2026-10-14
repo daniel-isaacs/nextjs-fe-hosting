@@ -8,10 +8,81 @@ summarises a milestone and, where there was one, the side effects and lessons
 we think are useful to anyone building on the same stack. Newest first.
 
 For the current state of things, see [caching](caching.md),
-[performance](performance.md), [content model](content-model.md) and
-[GEO](geo.md).
+[performance](performance.md), [observability](observability.md),
+[content model](content-model.md) and [GEO](geo.md).
 
 ---
+
+## 2026-10 — Observability with OpenTelemetry and Application Insights
+
+The site now sends OpenTelemetry traces, metrics and logs to Application
+Insights on Frontend Hosting. The platform already provides
+`APPLICATIONINSIGHTS_CONNECTION_STRING`, but nothing sends data to it until the
+app does. Locally the same data goes to an Aspire Dashboard. We get Next.js's
+spans, the Content JS SDK's built-in spans and metrics, and server-side
+`console` output, each linked to its request. Within a day it explained an
+outage we could not have diagnosed without it. See
+[observability](observability.md).
+
+Smaller changes around it:
+- **`/diagnostics/env` lists every variable by name.** It now also shows
+  every variable the platform injects, by name only. That's how we found the
+  connection string.
+- **`/diagnostics` is protected.** The old `/debug` page was merged into it,
+  with HTTP Basic Auth (see [developer tools](../README.md#developer-tools)).
+  It returns 404 until `DIAGNOSTICS_USER` and `DIAGNOSTICS_PASSWORD` are set.
+- **Media assets preview again.** Assets aren't localized, so the CMS sends an
+  empty `loc`, which made the SDK's preview lookup match nothing.
+
+Lighthouse is unchanged with all of this switched on: Home 94 and Article 97
+(mobile, median of 3).
+
+**Side effects / lessons**
+
+- **Telemetry that reads the clock during prerendering makes every page
+  return 500.** Under Cache Components, Next.js rejects `Date.now()` while it
+  prerenders the static shell. The OpenTelemetry SDK reads it for every span,
+  metric and log record.
+  - **Spans are fine:** Next.js deliberately starts them outside the prerender
+    scope.
+  - **Metrics and logs aren't handled by Next.js.** The SDK's component-lookup
+    metrics are recorded on every `<OptimizelyComponent>` render, and
+    forwarding `console` output does the same for any component that logs.
+    Each, in turn, took every CMS page to 500.
+  - **The fix:** we turned off the two component metrics (the component spans
+    carry the same timing), and emit log records from the async context
+    captured at startup, outside any render.
+  - **We reported the metrics problem to the SDK team.**
+- **None of it showed in `next dev` or `next build`.** Dev only logs a
+  warning. The build passes because CMS pages aren't prerendered at build
+  time. Only `next start` returned the 500s. Test telemetry changes with a
+  production build before deploying.
+- **One hung Graph call took Test2 down for five minutes.**
+  - **What happened:** the CMS SDK makes one schema lookup per process (which
+    content types are sections) and shares the pending request with every
+    page fetch. On a fresh instance, that one request got no response for 301
+    seconds; Graph calls sent at the same moment returned in 100 ms. Every
+    uncached render waited on it, Next.js gave up filling `'use cache'` after
+    about 54 s, and uncached pages returned 500 until Node's default 300 s
+    timeout ended the request.
+  - **How we found it:** Application Insights showed it directly, in the
+    request's trace and in the one slow dependency call.
+  - **The fix:** a global 10 s timeout on server-side `fetch`.
+  - **We reported it to the SDK team.**
+- **A timeout needs a short cache life for failures.** `getPageContent`
+  caught Graph errors and cached the resulting `null` with `cacheLife('max')`.
+  With a timeout in place, one hung call would have served a 404 until that
+  page's next publish. Failures are now cached for seconds.
+- **Startup code doesn't share modules with your routes.** We tried to run the
+  SDK's lookup in `register()` before traffic arrived. It had no effect:
+  Next.js bundles instrumentation separately, so it gets its own copy of the
+  SDK. Global state set there must live on `globalThis`, which is why the
+  fetch timeout (a global dispatcher) works and the warm-up didn't.
+- **Use the Azure exporters, not `useAzureMonitor()`.** The distro registers
+  its own metrics provider, which would bypass our metric filter.
+  `NodeSDK` also adds default OTLP metric and log exporters (to
+  `localhost:4318`) unless you pass empty lists. Locally that was hidden by
+  Aspire listening on that port.
 
 ## 2026-10 — SDK 3.0, Next.js 16.3, and two silent cache-handler breakages
 

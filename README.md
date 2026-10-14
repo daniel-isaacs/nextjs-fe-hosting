@@ -36,6 +36,7 @@ stack can see how the pieces fit together — and what broke along the way.
 | **UI** | Tailwind CSS 4, shadcn/ui primitives |
 | **Languages** | English, Norwegian, Swedish and Danish via next-intl |
 | **Hosting** | Optimizely Frontend Hosting: Cloudflare CDN in front of multiple Node instances, with a shared Redis cache |
+| **Observability** | OpenTelemetry traces, metrics and logs to Application Insights; Aspire Dashboard locally |
 | **Content** | Optimizely Mark for drafting, translation, images and metadata |
 
 ```mermaid
@@ -103,6 +104,21 @@ Next.js upgrade silently broke this twice, in ways `next dev` couldn't show.
 **→ [Caching](docs/caching.md):** the cache layers, the publish flow, how to test
 invalidation locally with a fake webhook, and what broke.
 
+### Observability
+
+Every request is traced into Application Insights, along with Graph calls, the
+Content JS SDK's built-in spans and metrics, and server-side `console`
+output. The traces explained an outage within a day: one Graph call that never
+got a response stalled every uncached page for five minutes, because the SDK
+shares one schema lookup across all requests. The fix was a 10-second
+timeout on server-side `fetch`. Adding telemetry also showed a Cache
+Components trap: telemetry that reads the clock while a page prerenders makes
+every page return 500, in production only.
+
+**→ [Observability](docs/observability.md):** how it's wired, running the Aspire
+Dashboard locally, querying Application Insights, and the prerendering rules
+telemetry has to follow.
+
 ### And also
 
 - **Live preview:** editors see their draft rendered by this app as they type,
@@ -115,6 +131,10 @@ invalidation locally with a fake webhook, and what broke.
 
 ## Latest updates
 
+- **October 2026 — Observability.** OpenTelemetry into Application Insights.
+  Telemetry recorded during prerendering returned 500 on every page, but only
+  in production, and the first traces explained a five-minute outage caused
+  by a single hung Graph call.
 - **October 2026 — SDK 3.0 and Next.js 16.3.** The upgrade itself was smooth,
   but it silently broke the shared cache handler twice: published pages stopped
   refreshing, and link prefetches failed with 500. Both only show up with
@@ -168,6 +188,10 @@ pages yourself, starting with a `LandingPageExperience` translated into each lan
 Locally, CMS reads are cached for minutes rather than until the next publish,
 because Graph's publish webhook can't reach `localhost`.
 
+**Telemetry (optional).** Run the Aspire Dashboard in Docker and set
+`OTEL_EXPORTER_OTLP_ENDPOINT` to see traces and logs locally; see
+[observability](docs/observability.md). Without it, telemetry is off.
+
 ## Deploying to Frontend Hosting
 
 ```bash
@@ -180,8 +204,10 @@ environment. Deployment credentials come from `OPTI_*` variables in `.env`
 or the environment, or from the OS keychain after `npx opticloud auth:login`.
 **`.zipignore` controls what goes into the package — keep `.env` in it.**
 
-The platform provides Redis, the managed identity and the Graph webhook
-credentials; the app registers its own publish webhook on startup.
+The platform provides Redis, the managed identity, the Graph webhook
+credentials and the Application Insights connection string. The app
+registers its own publish webhook on startup, and sends telemetry as soon as
+the connection string is present.
 
 ## Scripts
 
@@ -224,10 +250,11 @@ src/
   components/          React components by CMS role: pages, blocks, elements, experiences, layout
   content-types/       Content type definitions
   display-templates/   Display templates
-  lib/                 Graph reads, JSON-LD, SEO metadata, image loader, cache tags
+  lib/                 Graph reads, JSON-LD, SEO metadata, image loader, cache tags, fetch timeout
   optimizely.ts        SDK registries and component resolver
-  proxy.ts             Locale routing middleware
-  instrumentation.ts   Registers the Graph publish webhook on startup
+  proxy.ts             Locale routing middleware, /diagnostics auth
+  instrumentation.ts   Startup: telemetry, fetch timeout, Graph publish webhook
+  instrumentation.node.ts  OpenTelemetry setup (Application Insights or OTLP)
 cache-handler.mjs      Shared Redis cache handler
 scripts/               cms:diff and the Lighthouse harness
 docs/                  Documentation
@@ -241,6 +268,7 @@ docs/                  Documentation
 | [GEO](docs/geo.md) | Structured data, `llms.txt`, metadata, sitemap and robots |
 | [Performance](docs/performance.md) | Scores, measurement, what worked and what didn't |
 | [Caching](docs/caching.md) | Cache layers, publish flow, testing invalidation |
+| [Observability](docs/observability.md) | Telemetry setup, Aspire locally, querying Application Insights, prerendering rules |
 | [Updates](docs/updates.md) | Project history and lessons learned |
 
 ## Learn more
