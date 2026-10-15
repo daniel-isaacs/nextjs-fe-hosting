@@ -21,6 +21,8 @@
     "lh:desktop": "node scripts/lighthouse/run.mjs --desktop",
     "lh:trim": "node scripts/lighthouse/trim.mjs",
     "lh:history": "node scripts/lighthouse/history.mjs",
+    "aspire": "docker start aspire-dashboard || docker run -d --name aspire-dashboard --restart unless-stopped -p 18888:18888 -p 4318:18890 -e ASPIRE_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS=true mcr.microsoft.com/dotnet/aspire-dashboard:latest",
+    "aspire:stop": "docker stop aspire-dashboard",
     "preinstall": "npx only-allow npm"
   },
   "dependencies": {

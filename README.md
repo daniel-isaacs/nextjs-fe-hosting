@@ -188,8 +188,9 @@ pages yourself, starting with a `LandingPageExperience` translated into each lan
 Locally, CMS reads are cached for minutes rather than until the next publish,
 because Graph's publish webhook can't reach `localhost`.
 
-**Telemetry (optional).** Run the Aspire Dashboard in Docker and set
-`OTEL_EXPORTER_OTLP_ENDPOINT` to see traces and logs locally; see
+**Telemetry (optional).** Start the Aspire Dashboard with `npm run aspire`
+(needs Docker) and set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` to
+see traces and logs locally; see
 [observability](docs/observability.md). Without it, telemetry is off.
 
 ## Deploying to Frontend Hosting
@@ -221,6 +222,7 @@ the connection string is present.
 | `npm run deploy-test2` | Deploy to the Test2 environment |
 | `npm run lh` | Lighthouse against Test2, median of 3, stored in history |
 | `npm run lh:trim` / `lh:history` | Summarise the latest report / show the score trend |
+| `npm run aspire` / `aspire:stop` | Start / stop the local Aspire Dashboard for telemetry (Docker) |
 
 ## Developer tools
 

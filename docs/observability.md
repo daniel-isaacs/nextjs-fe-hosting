@@ -79,10 +79,13 @@ dependencies
 Start the Aspire Dashboard in Docker:
 
 ```bash
-docker run --rm -it -p 18888:18888 -p 4318:18890 \
-  -e ASPIRE_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS=true \
-  mcr.microsoft.com/dotnet/aspire-dashboard:latest
+npm run aspire        # creates the aspire-dashboard container, or starts it again
+npm run aspire:stop
 ```
+
+The container is created with `--restart unless-stopped`, so it comes back by
+itself whenever Docker starts, until you stop it. Telemetry is kept in memory
+only, so a restart clears it.
 
 Then set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` in `.env` and
 open <http://localhost:18888>. 18890 is the container's OTLP/HTTP port; the
