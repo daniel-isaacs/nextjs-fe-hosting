@@ -21,7 +21,7 @@ flowchart LR
 | Layer | What's cached | Lifetime | Invalidated by |
 |---|---|---|---|
 | **CDN** | Static JS/CSS, fonts and public assets (1 year, immutable); CMS images (4 hours) | Per header | Deploy (hashed file names), purge API |
-| **Route cache (Redis)** | Full pages: HTML, the React Server Component payload and the per-segment prefetch data | Until invalidated | Tag revalidation from the publish webhook |
+| **Route cache (Redis)** | Full pages: HTML, the React Server Component payload and the per-segment prefetch data | Until invalidated, at most 7 days (jittered) | Tag revalidation from the publish webhook |
 | **`'use cache'` functions** | Every CMS read: pages, people, listings, site settings, `llms.txt` data | `cacheLife('max')` (hours for the sitemap) | Tags, via the webhook |
 
 **HTML is not cached at the CDN yet.** Next.js already sends
@@ -56,6 +56,37 @@ That's deliberate. The build container sometimes saw ~50 s latency to Graph,
 which exceeds Next.js's limit for filling a `'use cache'` entry during the
 build, and prerendering every page makes builds slower as content grows. The
 cost is one uncached render per page after each deploy.
+
+### Every deploy starts with an empty cache, and every key expires
+
+Cache keys are prefixed with the deployment's ID
+(`nextjs:<OPTIMIZELY_DXP_DEPLOYMENT_ID>:`), so a new deploy reads and writes
+its own keys and starts empty. That's what you want: a page cached by the
+previous build references that build's JavaScript and CSS files, which no
+longer exist.
+
+The previous deploy's keys are never read again, so they have to expire by
+themselves. An eviction policy like `volatile-lru` only evicts keys that have a
+TTL, so **every key gets one**:
+
+- **The lifetime comes from Next.js**: the entry's `expire`, else its
+  `revalidate`. Next.js passes these as `context.cacheControl`. The reference
+  handler read `context.revalidate`, which doesn't exist, so it never set a
+  TTL at all.
+- **It's capped at 7 days.** Publishes keep pages fresh through tags, so the
+  cap only bounds how long leftovers stay around, and how long an unpublished
+  page goes without a re-render. Override with `CACHE_MAX_TTL_SECONDS`.
+- **It's jittered** to a random 75–100% of that. Pages cached at the same time
+  (after a deploy, or by a cache warm-up) would otherwise all expire at the
+  same moment and be re-rendered together. With jitter, they expire spread
+  over about 40 hours. On a large site this is the difference between a
+  steady trickle of renders and a spike against Graph.
+- **The tag hash expires 7 days after the last revalidation.** By then every
+  entry written before that revalidation has expired too, so the timestamps
+  can no longer matter.
+
+`/diagnostics/redis` shows memory use and the eviction policy per node, and
+how many keys each deployment prefix still has, with a TTL sample.
 
 ## What happens when an editor publishes
 

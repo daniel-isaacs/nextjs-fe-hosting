@@ -234,6 +234,7 @@ running site sees, on any environment:
 | `/diagnostics/env` | The environment variables the running instance has, with secrets masked — handy on Frontend Hosting, where the platform injects most of them |
 | `/diagnostics/raw-content?path=/en/` | The raw content the SDK gets from Graph for a page path |
 | `/diagnostics/sdk-query` | The GraphQL queries the SDK sends for a page |
+| `/diagnostics/redis` | Redis memory and eviction policy per node, and keys per deployment prefix with a TTL sample |
 | `/diagnostics/cms-graph` | Whether Graph returns page URLs, which the publish webhook depends on |
 
 The section is protected with HTTP Basic Auth. Set `DIAGNOSTICS_USER` and

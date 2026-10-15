@@ -15,6 +15,35 @@ import { metrics } from "@opentelemetry/api";
 const deploymentId = process.env.OPTIMIZELY_DXP_DEPLOYMENT_ID ?? "default";
 const CACHE_PREFIX = `nextjs:${deploymentId}:`;
 
+// How long an entry may live in Redis. Every key gets a TTL, because a new
+// deployment starts a new key prefix: entries from previous deployments are
+// never read again and must expire on their own (an eviction policy such as
+// volatile-lru never evicts keys without a TTL). Freshness doesn't depend on
+// this — publishes invalidate through tags — so the cap only bounds how long
+// leftovers stay around and how stale an unpublished page can get before it
+// is rendered again. Override with CACHE_MAX_TTL_SECONDS.
+const MAX_TTL_SECONDS = Number(process.env.CACHE_MAX_TTL_SECONDS) || 7 * 24 * 60 * 60;
+const MIN_TTL_SECONDS = 60;
+
+// The entry's lifetime from Next.js (expire, else revalidate; fetch entries
+// carry their own revalidate), capped at MAX_TTL_SECONDS, then set to a random
+// 75–100% of that. Without the jitter, pages cached together (a cache warm-up,
+// the burst of traffic after a deploy) would all expire together and be
+// re-rendered in the same few minutes, a week later. With it, a batch cached
+// at once expires spread over ~40 hours.
+//
+// Using expire rather than revalidate keeps the entry around after it turns
+// stale, so Next.js can serve it while it re-renders in the background.
+function entryTtl(value, context) {
+  const cacheControl = context?.cacheControl;
+  const lifetime =
+    [cacheControl?.expire, cacheControl?.revalidate, value?.revalidate].find(
+      (seconds) => typeof seconds === "number" && seconds > 0,
+    ) ?? MAX_TTL_SECONDS;
+  const capped = Math.min(lifetime, MAX_TTL_SECONDS);
+  return Math.max(MIN_TTL_SECONDS, Math.round(capped * (0.75 + Math.random() * 0.25)));
+}
+
 let cluster = null;
 let connectionFailedUntil = 0;
 
@@ -201,6 +230,9 @@ export async function getCluster() {
   return cluster;
 }
 
+/** For /diagnostics/redis: this deployment's key prefix and the TTL cap. */
+export const cacheSettings = { prefix: CACHE_PREFIX, maxTtlSeconds: MAX_TTL_SECONDS };
+
 // Tag invalidation is timestamp-based: revalidateTag() records when each tag
 // was revalidated, and get() treats an entry as a miss if any of its tags was
 // revalidated after the entry was written.
@@ -212,7 +244,11 @@ export async function getCluster() {
 // Timestamps don't depend on the key format at all.
 //
 // All tag timestamps live in one hash, so a lookup is a single HMGET (one slot,
-// safe in cluster mode).
+// safe in cluster mode). Its size is bounded by the number of distinct tags
+// (roughly a few per page), since revalidating a tag again overwrites its
+// field. The hash expires MAX_TTL_SECONDS after the last revalidation: by then
+// every entry written before that revalidation has expired too, so the
+// timestamps can no longer matter.
 const TAGS_KEY = `${CACHE_PREFIX}__tags__`;
 const memoryTagTimes = new Map();
 
@@ -271,13 +307,10 @@ export default class CacheHandler {
     const tags = context?.tags ?? [];
     const entry = { value, lastModified: Date.now(), tags };
     const stored = await withFallback("set", async (redis) => {
-      const serialized = serializeEntry(entry);
-      const ttl = context?.revalidate;
-      if (ttl && typeof ttl === "number") {
-        await redis.set(`${CACHE_PREFIX}${key}`, serialized, { EX: ttl });
-      } else {
-        await redis.set(`${CACHE_PREFIX}${key}`, serialized);
-      }
+      // Next.js passes the lifetime as context.cacheControl, not
+      // context.revalidate (which the reference handler read, so it never set
+      // a TTL at all).
+      await redis.set(`${CACHE_PREFIX}${key}`, serializeEntry(entry), { EX: entryTtl(value, context) });
       return true;
     });
     if (!stored) {
@@ -294,6 +327,7 @@ export default class CacheHandler {
     for (const tag of tagList) memoryTagTimes.set(tag, now);
     await withFallback("revalidateTag", async (redis) => {
       await redis.hSet(TAGS_KEY, Object.fromEntries(tagList.map((t) => [t, String(now)])));
+      await redis.expire(TAGS_KEY, MAX_TTL_SECONDS);
       return true;
     });
   }

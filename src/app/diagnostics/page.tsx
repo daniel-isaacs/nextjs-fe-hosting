@@ -31,6 +31,18 @@ export default function DiagnosticsIndex() {
         </li>
         <li>
           <Link
+            href="/diagnostics/redis"
+            className="block rounded border border-gray-200 bg-white p-4 hover:border-blue-400 hover:bg-blue-50 transition"
+          >
+            <div className="font-semibold text-gray-900">Redis cache</div>
+            <div className="text-sm text-gray-600 mt-1">
+              Memory and eviction policy per node, and keys per deployment
+              prefix with a TTL sample — shows leftovers from earlier deploys.
+            </div>
+          </Link>
+        </li>
+        <li>
+          <Link
             href="/diagnostics/cms-graph"
             className="block rounded border border-gray-200 bg-white p-4 hover:border-blue-400 hover:bg-blue-50 transition"
           >
